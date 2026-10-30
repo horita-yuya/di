@@ -326,10 +326,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case inTree:
 			if i := m.treeOffset + msg.Y; i < len(m.tree) {
 				n := m.tree[i]
-				if n.dir {
+				switch {
+				case n.dir:
 					m.open[n.path] = !m.open[n.path]
 					m.build()
-				} else {
+				case msg.X < 3+2*n.depth: // on the file arrow (after the 1-cell cursor and the indent)
+					m.collapsed[n.path] = !m.collapsed[n.path]
+					m.build()
+				default:
 					m.jump(n.path)
 				}
 			}
@@ -600,18 +604,21 @@ func (m model) View() string {
 			}
 			text += arrow + icon + n.name
 		default:
-			icon := "  \uf016 " // Nerd Font file, indented past the dir arrow to align with sibling dirs
+			arrow, icon := "▾ ", "\uf016 " // Nerd Font file; the arrow folds its diff
+			if m.collapsed[n.path] {
+				arrow = "▸ "
+			}
 			if !cur {
 				icon = fileStyle.Render(icon)
 			}
 			add, del := stat(n.file)
-			text += icon + n.name + "  "
+			text += arrow + icon + n.name + "  "
 			if cur {
 				text += fmt.Sprintf("+%d -%d", add, del) // inner colors would cut the cursor background
 			} else {
 				text += addStyle.Render(fmt.Sprintf("+%d", add)) + " " + delStyle.Render(fmt.Sprintf("-%d", del))
 			}
-			if m.cfg.Collapsed(n.path) {
+			if m.collapsed[n.path] {
 				st = dimStyle
 			}
 		}

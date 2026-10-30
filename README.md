@@ -39,7 +39,7 @@ Mouse driven (the keyboard only does `↑` / `↓` and `ctrl+c` to quit).
 | Action | Effect |
 | --- | --- |
 | Wheel | Scroll the pane under the pointer (tree / diff) |
-| Click in the tree | Open / close a directory, or jump to a file |
+| Click in the tree | Open / close a directory, or jump to a file (its arrow folds / unfolds the file) |
 | `↑` / `↓` | Jump to the previous / next file in the tree |
 | Click a file header | Fold / unfold the file |
 | Click a code line | Comment on that line (while typing, switches the target line and keeps the draft) |
