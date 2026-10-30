@@ -420,8 +420,14 @@ func (m *model) broadcast(t thread.Thread) {
 // keeping the same file/line at the top of the diff when possible.
 func (m *model) build() {
 	var at row
+	var skip int // rows above the top one with the same identity, e.g. earlier lines of its thread
+	// The old side is relative to the base, so it doesn't shift when the working tree changes.
+	same := func(r row) bool {
+		return path(r.file) == path(at.file) && r.kind == at.kind && r.thread == at.thread && r.old == at.old && (at.old != 0 || r.new == at.new)
+	}
 	if m.offset < len(m.rows) {
 		at = m.rows[m.offset]
+		skip = m.offset - slices.IndexFunc(m.rows, same)
 	}
 
 	m.rows = nil
@@ -506,10 +512,10 @@ func (m *model) build() {
 	}
 
 	if at.file != nil {
-		i := slices.IndexFunc(m.rows, func(r row) bool {
-			return path(r.file) == path(at.file) && r.kind == at.kind && r.old == at.old && r.new == at.new && r.thread == at.thread
-		})
-		if i < 0 {
+		i := slices.IndexFunc(m.rows, same)
+		if i >= 0 {
+			i += skip
+		} else {
 			i = m.header(path(at.file))
 		}
 		if i >= 0 {
