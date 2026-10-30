@@ -23,14 +23,12 @@ type Thread struct {
 	LineText string    `json:"line_text"`
 	Context  string    `json:"context"`
 	Messages []Message `json:"messages"`
-	Resolved bool      `json:"resolved"`
 }
 
 // Reply is sent mcp → TUI when Claude answers a thread.
 type Reply struct {
-	ID      string `json:"id" jsonschema:"thread id"`
-	Body    string `json:"body" jsonschema:"reply shown to the user in di"`
-	Resolve bool   `json:"resolve,omitempty" jsonschema:"true when the thread is done"`
+	ID   string `json:"id" jsonschema:"thread id"`
+	Body string `json:"body" jsonschema:"reply shown to the user in di"`
 }
 
 // SocketPath is unique per worktree. It is under /tmp rather than $TMPDIR, which can differ between

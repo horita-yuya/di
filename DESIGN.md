@@ -74,10 +74,9 @@ type Thread struct {
     LineText string    // コメント時点の行内容 (outdated 判定と Claude へのコンテキスト)
     Context  string    // コメント時点の hunk 抜粋 (対象行の前後 最大 8 行, " "/"+"/"-" prefix 付き)
     Messages []Message
-    Resolved bool
 }
 ```
-状態は派生: 最後の Author が user → "waiting for Claude"、claude → "Claude replied"、Resolved → "resolved"。
+状態は派生: 最後の Author が user → "waiting for Claude"、claude → "Claude replied"。
 
 ### TUI ⇄ `di mcp` の通信
 
@@ -90,8 +89,8 @@ type Thread struct {
 - TUI が listen。起動時に dial して繋がれば「この worktree で di は起動済み」でエラー終了、繋がらなければ stale socket を消して listen。終了時に削除。
 - プロトコル: 双方向 newline-delimited JSON (`json.Encoder`/`json.Decoder`)
   - TUI → mcp: `Thread` 全体。ユーザーが新規コメント / 返信した時に接続中の全 mcp へ broadcast。
-    mcp が接続した時は「未 resolve かつ最後が user」のスレッドを全部送る。
-  - mcp → TUI: `{"id", "body", "resolve"}` (Claude の返信)。TUI はメッセージ追加 (+ resolve) して再描画 (`p.Send`)。
+    mcp が接続した時は「最後が user」のスレッドを全部送る。
+  - mcp → TUI: `{"id", "body"}` (Claude の返信)。TUI はメッセージ追加して再描画 (`p.Send`)。
 - `di mcp` は TUI 未起動なら 1 秒間隔で再接続を試み続ける (Claude を先に起動しても良い)。
 
 ## Hot reload
@@ -116,14 +115,10 @@ git 実行は tea.Cmd 内 (goroutine) で行い UI をブロックしない。
 - file header: `▼ path  +N -M` / collapsed は `▶ path` のみ。rename は `old → new`、binary は "Binary file"。
 - code line: `old行番号 new行番号 ±内容`、追加=緑, 削除=赤。横はみ出しは切り詰め。
 - config で collapsed なファイルはデフォルトで `▶`。ユーザーは開ける。
-- keys: `j/k`, `ctrl+d/ctrl+u`, `g/G`, `n/p` 次/前ファイル, `enter|space` (header 上) 開閉, `x` カーソルのあるファイルを開閉,
-  `c` code line 上でコメント入力 (bubbles/textarea, `ctrl+s` 送信, `esc` 取消), `q`/`ctrl+c` 終了
-- スレッドは対象行の直下に表示: `💬 [status]` + メッセージを `you: ...` / `claude: ...` で時系列表示 (resolved は 1 行に畳む)。
-- スレッド行の上で `r` 返信 (textarea, 送信で Claude に push), `R` resolve 切替。
-- **未読通知**: Claude の返信を受けたスレッドは未読 (TUI 内の `map[threadID]bool` で十分, Thread 型には入れない)。
-  - 画面上部に目立つバナー `● Claude replied (N) — press u to jump` を未読がある間だけ表示。
-  - ツリーの該当ファイルにも `●` を付ける。
-  - `u` で次の未読スレッドへジャンプ (ファイルが collapsed なら展開、カーソルをスレッド行へ)。カーソルが乗ったら既読。
+- 操作はマウスのみ (キーは `ctrl+c` 終了だけ)。ホイールでポインタ下のペインをスクロール、ファイルヘッダのクリックで開閉、
+  コード行のクリックでコメント入力 (ホバー行の gutter に `+` を表示、入力中のクリックは書きかけのまま対象を切替) (画面下部の bubbles/textarea + `Comment` / `Cancel` ボタン)。
+- スレッドは対象行の直下に表示: `💬 [status]` + メッセージを `you: ...` / `claude: ...` で時系列表示。
+- スレッド末尾の `Comment` ボタンでスレッドにコメントを追加 (送信で Claude に push)。
   対象 (Side, Line) の行内容が LineText と一致しなければ outdated 扱いで file header 直下に表示。
 - footer: `<branch> ← <base>  N files  +A -D  │ keys hint`
 
@@ -134,16 +129,16 @@ go-sdk の stdio サーバー。cwd の repo を対象とする。
 - Capabilities: `Experimental: {"claude/channel": {}}`, tools
 - Instructions: 「`<channel source="di">` で届くのはユーザーが di でつけたレビューコメントのスレッド。
   対応 (コード修正 / 質問への回答) したら必ず `reply_comment` で返信する。ユーザーへの質問・確認も `reply_comment` で行う
-  (ユーザーは di 上で読んで返信する)。対応完了なら resolve=true」
+  (ユーザーは di 上で読んで返信する)」
 - Channel push: go-sdk は未知の method を送れないため、`mcp.Transport` をラップして `Connection` を捕まえ、
   `conn.Write(ctx, &jsonrpc.Request{Method: "notifications/claude/channel", Params: ...})` (ID 無し = notification) で直接送る。
   initialized 後にのみ送る。
   - params: `{"content": <整形済みテキスト>, "meta": {"thread_id": id, "file": file, "line": "<n>"}}` (meta は string 値, key は英数と _ のみ)
   - content: file:line (side)、Context (```diff ブロック)、スレッド全履歴、最新のユーザーメッセージを明示
 - Tools:
-  - `list_comments` — キャッシュ中の未 resolve スレッドを content と同形式で返す。channels を使わない場合のフォールバック
+  - `list_comments` — キャッシュ中のスレッドを content と同形式で返す。channels を使わない場合のフォールバック
     (「di のコメントに対応して」と頼めば動く)。
-  - `reply_comment {id, body, resolve?}` — socket 経由で TUI に返信を送る。TUI 未接続ならエラーを返す。
+  - `reply_comment {id, body}` — socket 経由で TUI に返信を送る。TUI 未接続ならエラーを返す。
 
 ### Claude Code 側のセットアップ (README に記載)
 ```

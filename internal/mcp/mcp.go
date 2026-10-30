@@ -22,8 +22,7 @@ import (
 
 const instructions = `Messages arriving as <channel source="di"> are review comment threads the user wrote in di (a terminal diff reviewer). ` +
 	`After handling one (fixing code or answering a question), always answer with reply_comment. ` +
-	`Ask the user questions or confirmations via reply_comment as well; they read and reply in di. ` +
-	`Set resolve=true when the thread is done.`
+	`Ask the user questions or confirmations via reply_comment as well; they read and reply in di.`
 
 // transport captures the stdio connection so the relay can send notifications go-sdk does not know about.
 type transport struct{ onConnect func(mcp.Connection) }
@@ -53,19 +52,17 @@ func Serve(ctx context.Context, sock, slug string) error {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "list_comments",
-		Description: "List unresolved di review comment threads.",
+		Description: "List di review comment threads.",
 	}, func(context.Context, *mcp.CallToolRequest, any) (*mcp.CallToolResult, any, error) {
 		r.mu.Lock()
 		defer r.mu.Unlock()
 		var texts []string
 		for _, t := range r.threads {
-			if !t.Resolved {
-				texts = append(texts, format(t))
-			}
+			texts = append(texts, format(t))
 		}
 		text := strings.Join(texts, "\n\n---\n\n")
 		if text == "" {
-			text = "No unresolved comments."
+			text = "No comments."
 		}
 		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}}, nil, nil
 	})
@@ -84,7 +81,6 @@ func Serve(ctx context.Context, sock, slug string) error {
 		}
 		if i := slices.IndexFunc(r.threads, func(t thread.Thread) bool { return t.ID == in.ID }); i >= 0 {
 			r.threads[i].Messages = append(r.threads[i].Messages, thread.Message{Author: "claude", Body: in.Body})
-			r.threads[i].Resolved = in.Resolve
 		}
 		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "sent"}}}, nil, nil
 	})
