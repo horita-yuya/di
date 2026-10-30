@@ -82,6 +82,16 @@ func (r *Repo) Diff(base string) ([]*gitdiff.File, string, error) {
 	return files, raw, err
 }
 
+// CommitPush stages everything, commits it with msg and pushes the current branch to origin.
+func (r *Repo) CommitPush(msg string) error {
+	for _, args := range [][]string{{"add", "-A"}, {"commit", "-m", msg}, {"push", "-u", "origin", "HEAD"}} {
+		if _, err := git(r.Root, args...); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func git(dir string, args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir

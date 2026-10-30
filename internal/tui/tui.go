@@ -18,6 +18,7 @@ import (
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/horitayuya/di/internal/config"
 	"github.com/horitayuya/di/internal/git"
 	"github.com/horitayuya/di/internal/thread"
@@ -87,6 +88,7 @@ type loadedMsg struct {
 	raw    string
 	files  []*gitdiff.File
 	err    error
+	gen    int
 }
 
 // peerMsg is a newly connected `di mcp` (one per Claude Code session); peerGoneMsg is one that disconnected.
@@ -95,11 +97,16 @@ type (
 	peerGoneMsg struct{ conn net.Conn }
 )
 
+// pushedMsg is the result of Commit & Push.
+type pushedMsg struct{ err error }
+
 type model struct {
-	repo *git.Repo
-	slug string
-	cfg  config.RepoConfig
-	base string
+	repo  *git.Repo
+	slug  string
+	cfg   config.RepoConfig
+	base  string
+	bases [2]string // diff targets selectable in the footer: the configured base and HEAD (uncommitted changes)
+	gen   int       // bumped on base change so in-flight loads for the old base are dropped
 
 	branch string
 	raw    string
@@ -119,9 +126,13 @@ type model struct {
 	current            string // file highlighted in the tree
 
 	editing bool
+	commit  bool   // the textarea holds a commit message instead of a comment
 	replyTo string // thread ID being commented on; "" for a new thread on target
 	target  row
 	input   textarea.Model
+
+	pushing bool
+	pushErr error // kept apart from err, which every reload overwrites
 
 	width, height int
 }
@@ -143,11 +154,10 @@ func Run(repo *git.Repo, slug string, cfg config.RepoConfig, base string) error 
 	// which stalls and leaks the reply into the input.
 	lipgloss.SetHasDarkBackground(false)
 	input := textarea.New()
-	input.Placeholder = "Leave a comment (enter: send, alt+enter: newline)"
 	input.KeyMap.InsertNewline.SetKeys("alt+enter", "ctrl+j")
 	input.ShowLineNumbers = false
 	input.SetHeight(5)
-	p := tea.NewProgram(model{repo: repo, slug: slug, cfg: cfg, base: base, input: input,
+	p := tea.NewProgram(model{repo: repo, slug: slug, cfg: cfg, base: base, bases: [2]string{base, "HEAD"}, input: input,
 		collapsed: map[string]bool{}, open: map[string]bool{}}, tea.WithAltScreen(), tea.WithMouseAllMotion())
 	go func() {
 		for {
@@ -182,7 +192,7 @@ func (m model) load() tea.Msg {
 	if c, err := config.Load(); err == nil {
 		cfg = c.Repo(m.slug) // pick up edits, e.g. set_collapsed from Claude
 	}
-	return loadedMsg{cfg: cfg, branch: m.repo.Branch(), raw: raw, files: files, err: err}
+	return loadedMsg{cfg: cfg, branch: m.repo.Branch(), raw: raw, files: files, err: err, gen: m.gen}
 }
 
 func (m model) Init() tea.Cmd { return m.load }
@@ -192,8 +202,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.input.SetWidth(msg.Width)
-		m.scroll()
+		m.build() // rewraps threads
 	case loadedMsg:
+		if msg.gen != m.gen {
+			return m, nil // stale load; also ends its tick chain
+		}
 		next := tea.Tick(time.Second, func(time.Time) tea.Msg { return m.load() })
 		m.branch, m.err = cmp.Or(msg.branch, m.branch), msg.err
 		cfgChanged := !slices.Equal(msg.cfg.CollapsedGlobs, m.cfg.CollapsedGlobs)
@@ -218,6 +231,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case peerGoneMsg:
 		m.peers = slices.DeleteFunc(m.peers, func(c net.Conn) bool { return c == msg.conn })
+	case pushedMsg:
+		m.pushing, m.pushErr = false, msg.err
+		if msg.err == nil {
+			m.gen++ // restarts the reload loop instead of starting a second one
+			return m, m.load
+		}
 	case thread.Reply:
 		i := slices.IndexFunc(m.threads, func(t thread.Thread) bool { return t.ID == msg.ID })
 		if i < 0 {
@@ -231,8 +250,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.editing {
 			if msg.String() == "enter" {
-				m.submit()
-				return m, nil
+				cmd := m.submit()
+				return m, cmd
 			}
 			var cmd tea.Cmd
 			m.input, cmd = m.input.Update(msg)
@@ -272,14 +291,34 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.current = path(m.rows[m.offset].file)
 			}
 		case msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft:
+		case msg.Y == m.height-1:
+			// Base buttons in the footer, laid out as in View.
+			x := lipgloss.Width(m.status() + m.branch + " ← ")
+			for _, b := range m.bases {
+				w := lipgloss.Width(" " + b + " ")
+				if msg.X >= x && msg.X < x+w && b != m.base {
+					m.base = b
+					m.gen++
+					return m, m.load
+				}
+				x += w + 1
+			}
+			x++ // two spaces before the commit button
+			if !m.pushing && msg.X >= x && msg.X < x+lipgloss.Width(" Commit & Push ") {
+				m.editing, m.commit = true, true
+				m.input.Placeholder = "Commit message (enter: commit & push, empty: timestamp)"
+				m.scroll()
+				return m, m.input.Focus()
+			}
 		case msg.Y >= h:
 			// Buttons under the textarea: " Comment " at x 0-8, " Cancel " at x 11-18.
 			if m.editing && msg.Y == h+lipgloss.Height(m.input.View()) {
 				switch {
 				case msg.X < 9:
-					m.submit()
+					cmd := m.submit()
+					return m, cmd
 				case msg.X >= 11 && msg.X < 19:
-					m.editing = false
+					m.editing, m.commit = false, false
 					m.input.Reset()
 					m.scroll()
 				}
@@ -301,7 +340,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.collapsed[path(r.file)] = !m.collapsed[path(r.file)]
 					m.build()
 				case r.kind == rowComment || r.kind == rowLine: // retargets an open textarea, keeping the draft
-					m.editing, m.replyTo, m.target = true, r.thread, r
+					m.editing, m.commit, m.replyTo, m.target = true, false, r.thread, r
+					m.input.Placeholder = "Leave a comment (enter: send, alt+enter: newline)"
 					m.scroll()
 					return m, m.input.Focus()
 				}
@@ -311,14 +351,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// submit adds the textarea content to the thread being commented on, or starts a new one on target.
-func (m *model) submit() {
+// submit commits and pushes with the textarea content as message in commit mode; otherwise it adds
+// the content to the thread being commented on, or starts a new one on target.
+func (m *model) submit() tea.Cmd {
 	m.editing = false
 	body := strings.TrimSpace(m.input.Value())
 	m.input.Reset()
+	if m.commit {
+		m.commit, m.pushing, m.pushErr = false, true, nil
+		m.scroll()
+		return func() tea.Msg {
+			return pushedMsg{m.repo.CommitPush(cmp.Or(body, strconv.FormatInt(time.Now().Unix(), 10)))}
+		}
+	}
 	if body == "" {
 		m.scroll()
-		return
+		return nil
 	}
 	user := thread.Message{Author: "user", Body: body}
 	if i := slices.IndexFunc(m.threads, func(t thread.Thread) bool { return t.ID == m.replyTo }); i >= 0 {
@@ -343,6 +391,7 @@ func (m *model) submit() {
 		m.broadcast(m.threads[len(m.threads)-1])
 	}
 	m.build()
+	return nil
 }
 
 // broadcast sends t to every connected `di mcp`, dropping peers that went away.
@@ -394,14 +443,14 @@ func (m *model) build() {
 			if text, ok := lines[k]; ok && text == t.LineText {
 				attached[k] = append(attached[k], t)
 			} else {
-				m.rows = append(m.rows, threadRows(f, t, fmt.Sprintf("(outdated %s:%d) ", t.Side, t.Line))...)
+				m.rows = append(m.rows, threadRows(f, t, fmt.Sprintf("(outdated %s:%d) ", t.Side, t.Line), m.diffWidth()-12)...)
 			}
 		}
 		for _, r := range body {
 			m.rows = append(m.rows, r)
 			if r.kind == rowLine {
 				for _, t := range attached[r.key()] {
-					m.rows = append(m.rows, threadRows(f, t, "")...)
+					m.rows = append(m.rows, threadRows(f, t, "", m.diffWidth()-12)...)
 				}
 			}
 		}
@@ -453,7 +502,8 @@ func (m *model) build() {
 	m.scroll()
 }
 
-func threadRows(f *gitdiff.File, t thread.Thread, label string) []row {
+// threadRows renders t as rows of at most width cells, wrapping message bodies.
+func threadRows(f *gitdiff.File, t thread.Thread, label string, width int) []row {
 	var lines []string
 	switch {
 	case t.Messages[len(t.Messages)-1].Author == "claude":
@@ -466,7 +516,7 @@ func threadRows(f *gitdiff.File, t thread.Thread, label string) []row {
 		if msg.Author == "claude" {
 			who = "claude: "
 		}
-		for i, l := range strings.Split(msg.Body, "\n") {
+		for i, l := range strings.Split(ansi.Wrap(msg.Body, width-2-len(who), ""), "\n") {
 			if i > 0 {
 				who = strings.Repeat(" ", len(who))
 			}
@@ -500,7 +550,7 @@ func (m *model) jump(p string) {
 
 // selected reports whether r is what the open textarea comments on.
 func (m model) selected(r row) bool {
-	if !m.editing {
+	if !m.editing || m.commit {
 		return false
 	}
 	if m.replyTo != "" {
@@ -524,13 +574,15 @@ func (m model) bodyHeight() int {
 	return max(1, h)
 }
 
+func (m model) diffWidth() int { return m.width - m.width*3/10 - 1 }
+
 func (m model) View() string {
 	if m.width == 0 {
 		return ""
 	}
 	h := m.bodyHeight()
 	treeW := m.width * 3 / 10
-	diffW := m.width - treeW - 1
+	diffW := m.diffWidth()
 
 	var tree []string
 	for _, n := range m.tree[m.treeOffset:min(len(m.tree), m.treeOffset+h)] {
@@ -632,13 +684,21 @@ func (m model) View() string {
 		a, d := stat(f)
 		add, del = add+a, del+d
 	}
-	footer := dimStyle.Render("○ Claude not connected") + "  "
-	if len(m.peers) > 0 {
-		footer = addStyle.Bold(true).Render(fmt.Sprintf("● Claude connected (%d)", len(m.peers))) + "  "
+	footer := m.status() + m.branch + " ←"
+	for _, b := range m.bases {
+		st := cancelStyle
+		if b == m.base {
+			st = buttonStyle
+		}
+		footer += " " + st.Render(" "+b+" ")
 	}
-	footer += fmt.Sprintf("%s ← %s  %d files  +%d -%d", m.branch, m.base, len(m.files), add, del)
+	footer += "  " + buttonStyle.Render(map[bool]string{false: " Commit & Push ", true: " Pushing… "}[m.pushing])
+	footer += fmt.Sprintf("  %d files  +%d -%d", len(m.files), add, del)
 	if m.err != nil {
 		footer += "  │ " + errStyle.Render(m.err.Error())
+	}
+	if m.pushErr != nil {
+		footer += "  │ " + errStyle.Render(m.pushErr.Error())
 	}
 
 	view := lipgloss.JoinHorizontal(lipgloss.Top,
@@ -647,16 +707,27 @@ func (m model) View() string {
 		lipgloss.NewStyle().Width(diffW).Height(h).Render(strings.Join(diff, "\n")),
 	)
 	if m.editing {
-		k := m.target.key()
-		t := thread.Thread{File: path(m.target.file), Side: k.side, Line: k.line}
-		if i := slices.IndexFunc(m.threads, func(t thread.Thread) bool { return t.ID == m.replyTo }); i >= 0 {
-			t = m.threads[i]
+		btn, hint := " Commit ", "  → commit all changes & push"
+		if !m.commit {
+			k := m.target.key()
+			t := thread.Thread{File: path(m.target.file), Side: k.side, Line: k.line}
+			if i := slices.IndexFunc(m.threads, func(t thread.Thread) bool { return t.ID == m.replyTo }); i >= 0 {
+				t = m.threads[i]
+			}
+			side := map[string]string{"old": "L", "new": "R"}[t.Side] // GitHub's left/right line notation
+			btn, hint = " Comment ", fmt.Sprintf("  → %s %s%d", t.File, side, t.Line)
 		}
-		side := map[string]string{"old": "L", "new": "R"}[t.Side] // GitHub's left/right line notation
-		view += "\n" + m.input.View() + "\n" + buttonStyle.Render(" Comment ") + "  " + cancelStyle.Render(" Cancel ") +
-			dimStyle.Render(fmt.Sprintf("  → %s %s%d", t.File, side, t.Line))
+		view += "\n" + m.input.View() + "\n" + buttonStyle.Render(btn) + "  " + cancelStyle.Render(" Cancel ") + dimStyle.Render(hint)
 	}
 	return view + "\n" + lipgloss.NewStyle().Inline(true).MaxWidth(m.width).Render(footer)
+}
+
+// status is the footer's leading Claude connection indicator.
+func (m model) status() string {
+	if len(m.peers) > 0 {
+		return addStyle.Bold(true).Render(fmt.Sprintf("● Claude connected (%d)", len(m.peers))) + "  "
+	}
+	return dimStyle.Render("○ Claude not connected") + "  "
 }
 
 // path is the new path, or the old path for deleted files.
