@@ -13,7 +13,7 @@ di upgrade          # 最新リリースでバイナリを置き換える (git r
 
 ## Dependencies (これ以外は足さない)
 
-- github.com/charmbracelet/bubbletea v1, bubbles (textarea), lipgloss — TUI
+- charm.land/bubbletea/v2, bubbles/v2 (textarea), lipgloss/v2 — TUI
 - github.com/bluekeyes/go-gitdiff — unified diff のパース (自前パーサを書かない)
 - github.com/bmatcuk/doublestar/v4 — glob (`**`)
 - github.com/modelcontextprotocol/go-sdk — MCP
@@ -112,6 +112,7 @@ git 実行は tea.Cmd 内 (goroutine) で行い UI をブロックしない。
 - `j/k` 移動, `enter`: dir → 開閉 / file → diff 側をそのファイルへジャンプ (collapsed なら展開)。
 - ファイル行にも `▾/▸` を表示し、クリックで fold 状態をトグル (行の他の部分はジャンプ)。
 - diff 側カーソルのファイルをツリーでハイライト (同期)。
+- Claude の返信に未回答のスレッドがあるファイル (と、それを含む閉じたディレクトリ) をスレッドと同じ黄色でハイライト。
 
 ### Diff
 - 平坦な row 配列 (file header / hunk header / code line / comment) を自前でスクロール描画する (viewport 不要)。

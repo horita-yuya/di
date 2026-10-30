@@ -14,10 +14,10 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/bubbles/v2/textarea"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/bluekeyes/go-gitdiff/gitdiff"
-	"github.com/charmbracelet/bubbles/textarea"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/horita-yuya/di/internal/config"
 	"github.com/horita-yuya/di/internal/git"
@@ -105,8 +105,8 @@ type model struct {
 	slug  string
 	cfg   config.RepoConfig
 	base  string
-	bases [2]string // diff targets selectable in the footer: the configured base and HEAD (uncommitted changes)
-	gen   int       // bumped on base change so in-flight loads for the old base are dropped
+	bases []string // diff targets selectable in the footer: the configured base, origin/main and HEAD (uncommitted changes)
+	gen   int      // bumped on base change so in-flight loads for the old base are dropped
 
 	branch string
 	raw    string
@@ -150,15 +150,14 @@ func Run(repo *git.Repo, slug string, cfg config.RepoConfig, base string) error 
 	}
 	defer ln.Close() // also removes the socket file
 
-	// Light theme only. Also keeps adaptive colors (textarea) from querying the terminal mid-session,
-	// which stalls and leaks the reply into the input.
-	lipgloss.SetHasDarkBackground(false)
 	input := textarea.New()
+	input.SetStyles(textarea.DefaultLightStyles())
+	input.SetVirtualCursor(false) // View places the real cursor, where the terminal draws IME preedit
 	input.KeyMap.InsertNewline.SetKeys("alt+enter", "ctrl+j")
 	input.ShowLineNumbers = false
 	input.SetHeight(5)
-	p := tea.NewProgram(model{repo: repo, slug: slug, cfg: cfg, base: base, bases: [2]string{base, "HEAD"}, input: input,
-		collapsed: map[string]bool{}, open: map[string]bool{}}, tea.WithAltScreen(), tea.WithMouseAllMotion())
+	p := tea.NewProgram(model{repo: repo, slug: slug, cfg: cfg, base: base, bases: slices.Compact([]string{base, "origin/main", "HEAD"}), input: input,
+		collapsed: map[string]bool{}, open: map[string]bool{}})
 	go func() {
 		for {
 			c, err := ln.Accept()
@@ -178,9 +177,6 @@ func Run(repo *git.Repo, slug string, cfg config.RepoConfig, base string) error 
 			}()
 		}
 	}()
-	// OSC 10/11 set the terminal's default fg/bg; OSC 110/111 restore them.
-	fmt.Print("\x1b]10;#1f2328\x07\x1b]11;#ffffff\x07")
-	defer fmt.Print("\x1b]110\x07\x1b]111\x07")
 	_, err = p.Run()
 	return err
 }
@@ -244,7 +240,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.threads[i].Messages = append(m.threads[i].Messages, thread.Message{Author: "claude", Body: msg.Body})
 		m.build()
-	case tea.KeyMsg:
+	case tea.PasteMsg:
+		if m.editing {
+			var cmd tea.Cmd
+			m.input, cmd = m.input.Update(msg)
+			return m, cmd
+		}
+	case tea.KeyPressMsg:
 		if msg.String() == "ctrl+c" {
 			return m, tea.Quit
 		}
@@ -272,13 +274,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case tea.MouseMsg:
-		m.mouseX, m.mouseY = msg.X, msg.Y
+		_, click := msg.(tea.MouseClickMsg)
+		mouse := msg.Mouse()
+		m.mouseX, m.mouseY = mouse.X, mouse.Y
 		treeW, h := m.width*3/10, m.bodyHeight()
-		inTree := msg.X < treeW
+		inTree := mouse.X < treeW
 		switch {
-		case msg.Button == tea.MouseButtonWheelUp || msg.Button == tea.MouseButtonWheelDown:
+		case mouse.Button == tea.MouseWheelUp || mouse.Button == tea.MouseWheelDown:
 			d := 3
-			if msg.Button == tea.MouseButtonWheelUp {
+			if mouse.Button == tea.MouseWheelUp {
 				d = -3
 			}
 			if inTree {
@@ -290,13 +294,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !inTree && m.offset < len(m.rows) {
 				m.current = path(m.rows[m.offset].file)
 			}
-		case msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft:
-		case msg.Y == m.height-1:
+		case !click || mouse.Button != tea.MouseLeft:
+		case mouse.Y == m.height-1:
 			// Base buttons in the footer, laid out as in View.
 			x := lipgloss.Width(m.status() + m.branch + " ← ")
 			for _, b := range m.bases {
 				w := lipgloss.Width(" " + b + " ")
-				if msg.X >= x && msg.X < x+w && b != m.base {
+				if mouse.X >= x && mouse.X < x+w && b != m.base {
 					m.base = b
 					m.gen++
 					return m, m.load
@@ -304,33 +308,33 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				x += w + 1
 			}
 			x++ // two spaces before the commit button
-			if !m.pushing && msg.X >= x && msg.X < x+lipgloss.Width(" Commit & Push ") {
+			if !m.pushing && mouse.X >= x && mouse.X < x+lipgloss.Width(" Commit & Push ") {
 				m.editing, m.commit = true, true
 				m.input.Placeholder = "Commit message (enter: commit & push, empty: timestamp)"
 				m.scroll()
 				return m, m.input.Focus()
 			}
-		case msg.Y >= h:
+		case mouse.Y >= h:
 			// Buttons under the textarea: " Comment " at x 0-8, " Cancel " at x 11-18.
-			if m.editing && msg.Y == h+lipgloss.Height(m.input.View()) {
+			if m.editing && mouse.Y == h+lipgloss.Height(m.input.View()) {
 				switch {
-				case msg.X < 9:
+				case mouse.X < 9:
 					cmd := m.submit()
 					return m, cmd
-				case msg.X >= 11 && msg.X < 19:
+				case mouse.X >= 11 && mouse.X < 19:
 					m.editing, m.commit = false, false
 					m.input.Reset()
 					m.scroll()
 				}
 			}
 		case inTree:
-			if i := m.treeOffset + msg.Y; i < len(m.tree) {
+			if i := m.treeOffset + mouse.Y; i < len(m.tree) {
 				n := m.tree[i]
 				switch {
 				case n.dir:
 					m.open[n.path] = !m.open[n.path]
 					m.build()
-				case msg.X < 3+2*n.depth: // on the file arrow (after the 1-cell cursor and the indent)
+				case mouse.X < 3+2*n.depth: // on the file arrow (after the 1-cell cursor and the indent)
 					m.collapsed[n.path] = !m.collapsed[n.path]
 					m.build()
 				default:
@@ -338,7 +342,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		default:
-			if i := m.offset + msg.Y; i < len(m.rows) {
+			if i := m.offset + mouse.Y; i < len(m.rows) {
 				switch r := m.rows[i]; {
 				case r.kind == rowFile:
 					m.collapsed[path(r.file)] = !m.collapsed[path(r.file)]
@@ -580,17 +584,30 @@ func (m model) bodyHeight() int {
 
 func (m model) diffWidth() int { return m.width - m.width*3/10 - 1 }
 
-func (m model) View() string {
+func (m model) View() tea.View {
+	// Light theme only: the terminal's default fg/bg are switched while di runs.
+	v := tea.View{AltScreen: true, MouseMode: tea.MouseModeAllMotion,
+		ForegroundColor: lipgloss.Color("#1f2328"), BackgroundColor: lipgloss.Color("#ffffff")}
 	if m.width == 0 {
-		return ""
+		return v
 	}
 	h := m.bodyHeight()
 	treeW := m.width * 3 / 10
 	diffW := m.diffWidth()
 
+	var replied []string // files with a Claude reply the user hasn't answered
+	for _, t := range m.threads {
+		if t.Messages[len(t.Messages)-1].Author == "claude" {
+			replied = append(replied, t.File)
+		}
+	}
 	var tree []string
 	for _, n := range m.tree[m.treeOffset:min(len(m.tree), m.treeOffset+h)] {
 		cur := !n.dir && n.path == m.current
+		hl := slices.ContainsFunc(replied, func(f string) bool {
+			return f == n.path || n.dir && !m.open[n.path] && strings.HasPrefix(f, n.path+"/")
+		})
+		plain := cur || hl // inner colors would cut the row background
 		text := strings.Repeat("  ", n.depth)
 		st := lipgloss.NewStyle()
 		switch {
@@ -599,8 +616,8 @@ func (m model) View() string {
 			if m.open[n.path] {
 				arrow, icon = "▾ ", "\uf07c "
 			}
-			if !cur {
-				icon = folderStyle.Render(icon) // inner colors would cut the cursor background
+			if !plain {
+				icon = folderStyle.Render(icon)
 			}
 			text += arrow + icon + n.name
 		default:
@@ -608,19 +625,22 @@ func (m model) View() string {
 			if m.collapsed[n.path] {
 				arrow = "▸ "
 			}
-			if !cur {
+			if !plain {
 				icon = fileStyle.Render(icon)
 			}
 			add, del := stat(n.file)
 			text += arrow + icon + n.name + "  "
-			if cur {
-				text += fmt.Sprintf("+%d -%d", add, del) // inner colors would cut the cursor background
+			if plain {
+				text += fmt.Sprintf("+%d -%d", add, del)
 			} else {
 				text += addStyle.Render(fmt.Sprintf("+%d", add)) + " " + delStyle.Render(fmt.Sprintf("-%d", del))
 			}
 			if m.collapsed[n.path] {
 				st = dimStyle
 			}
+		}
+		if hl {
+			st = threadStyle
 		}
 		if cur {
 			st = st.Foreground(lipgloss.Color("#1f2328")).Background(cursorBg)
@@ -724,9 +744,13 @@ func (m model) View() string {
 			side := map[string]string{"old": "L", "new": "R"}[t.Side] // GitHub's left/right line notation
 			btn, hint = " Comment ", fmt.Sprintf("  → %s %s%d", t.File, side, t.Line)
 		}
+		if v.Cursor = m.input.Cursor(); v.Cursor != nil {
+			v.Cursor.Y += h // the textarea starts right below the body
+		}
 		view += "\n" + m.input.View() + "\n" + buttonStyle.Render(btn) + "  " + cancelStyle.Render(" Cancel ") + dimStyle.Render(hint)
 	}
-	return view + "\n" + lipgloss.NewStyle().Inline(true).MaxWidth(m.width).Render(footer)
+	v.Content = view + "\n" + lipgloss.NewStyle().Inline(true).MaxWidth(m.width).Render(footer)
+	return v
 }
 
 // status is the footer's leading Claude connection indicator.

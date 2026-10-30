@@ -28,7 +28,7 @@ Comment threads live only inside the di process and are gone when di exits. You 
 
 Light theme only. While running, di switches the terminal background to white (OSC 10/11) and restores it on exit (OSC 110/111).
 
-The footer has two base buttons: the configured base and `HEAD` (uncommitted changes only: staged, unstaged and untracked). Click one to choose the diff target.
+The footer has base buttons for the configured base, `origin/main` and `HEAD` (uncommitted changes only: staged, unstaged and untracked). Click one to choose the diff target.
 The footer's `Commit & Push` button opens the input for a commit message; `enter` or `Commit` runs `git add -A`, `git commit` and `git push -u origin HEAD`.
 An empty message uses the Unix timestamp. Errors are shown in the footer.
 
@@ -48,7 +48,7 @@ Mouse driven (the keyboard only does `↑` / `↓` and `ctrl+c` to quit).
 | Base button in the footer | Diff against that base |
 | `Commit & Push` in the footer | Commit all changes and push |
 
-Thread comments wrap to the width of the diff pane.
+Thread comments wrap to the width of the diff pane. Files with an unanswered Claude reply (and closed folders containing them) are highlighted in the tree.
 
 ## Config
 
