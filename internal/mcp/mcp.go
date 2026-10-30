@@ -14,8 +14,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/horitayuya/di/internal/config"
-	"github.com/horitayuya/di/internal/thread"
+	"github.com/horita-yuya/di/internal/config"
+	"github.com/horita-yuya/di/internal/thread"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )

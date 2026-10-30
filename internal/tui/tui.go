@@ -19,9 +19,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/horitayuya/di/internal/config"
-	"github.com/horitayuya/di/internal/git"
-	"github.com/horitayuya/di/internal/thread"
+	"github.com/horita-yuya/di/internal/config"
+	"github.com/horita-yuya/di/internal/git"
+	"github.com/horita-yuya/di/internal/thread"
 )
 
 var (

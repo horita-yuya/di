@@ -1,4 +1,4 @@
-module github.com/horitayuya/di
+module github.com/horita-yuya/di
 
 go 1.27.3
 

@@ -8,12 +8,15 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/horitayuya/di/internal/config"
-	"github.com/horitayuya/di/internal/git"
-	"github.com/horitayuya/di/internal/mcp"
-	"github.com/horitayuya/di/internal/thread"
-	"github.com/horitayuya/di/internal/tui"
+	"github.com/horita-yuya/di/internal/config"
+	"github.com/horita-yuya/di/internal/git"
+	"github.com/horita-yuya/di/internal/mcp"
+	"github.com/horita-yuya/di/internal/thread"
+	"github.com/horita-yuya/di/internal/tui"
+	"github.com/horita-yuya/di/internal/upgrade"
 )
+
+var version = "dev" // set by goreleaser
 
 func main() {
 	if err := run(); err != nil {
@@ -23,6 +26,9 @@ func main() {
 }
 
 func run() error {
+	if len(os.Args) > 1 && os.Args[1] == "upgrade" {
+		return upgrade.Run(version)
+	}
 	repo, err := git.Open(".")
 	if err != nil {
 		return err

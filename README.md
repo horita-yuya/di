@@ -1,65 +1,80 @@
 # di
 
-GitHub の "Files changed" をターミナルで。作業ブランチと base ブランチの差分をレビューし、
-行コメントを MCP (Claude Code channels) 経由で Claude に送ってそのまま対応させます。
+GitHub's "Files changed" in your terminal. Review the diff between your working branch and the base branch,
+and send line comments to Claude via MCP (Claude Code channels) so it can address them right away.
 
-## インストール
+## Install
 
-```sh
-GOBIN=~/.local/bin go install .   # PATH 上の任意のディレクトリへ
-```
-
-## 使い方
+Download an archive for your platform from [Releases](https://github.com/horita-yuya/di/releases) and put `di` on your PATH, or:
 
 ```sh
-di [--base <ref>]   # TUI を起動 (base: --base > config > origin/HEAD > main > master)
-di mcp              # stdio MCP サーバー (Claude Code から起動される)
+go install github.com/horita-yuya/di@latest
+GOBIN=~/.local/bin go install .   # from a clone, into any directory on your PATH
 ```
 
-差分は base との merge-base から working tree まで (未コミット・untracked を含む) で、1 秒ごとに自動更新されます。
-コメントスレッドは di のプロセス内にだけ保持され、di を終了すると消えます。di は worktree ごとに 1 つ起動できます。
+`di upgrade` updates a release binary in place to the latest release (the archive is verified against the release's SHA-256 checksums).
+Every push to main is released automatically as the next patch version.
 
-ライトテーマ専用です。起動中はターミナルの背景を白に切り替え (OSC 10/11)、終了時に元に戻します (OSC 110/111)。
+## Usage
 
-### 操作
+```sh
+di [--base <ref>]   # start the TUI (base: --base > config > origin/HEAD > main > master)
+di mcp              # stdio MCP server (started by Claude Code)
+di upgrade          # replace this binary with the latest release
+```
 
-マウスで操作します (キーボードは `↑` / `↓` と `ctrl+c` で終了のみ)。
+The diff runs from the merge-base with base to the working tree (including uncommitted and untracked files) and refreshes every second.
+Comment threads live only inside the di process and are gone when di exits. You can run one di per worktree.
 
-| 操作 | 動作 |
+Light theme only. While running, di switches the terminal background to white (OSC 10/11) and restores it on exit (OSC 110/111).
+
+The footer has two base buttons: the configured base and `HEAD` (uncommitted changes only: staged, unstaged and untracked). Click one to choose the diff target.
+The footer's `Commit & Push` button opens the input for a commit message; `enter` or `Commit` runs `git add -A`, `git commit` and `git push -u origin HEAD`.
+An empty message uses the Unix timestamp. Errors are shown in the footer.
+
+### Controls
+
+Mouse driven (the keyboard only does `↑` / `↓` and `ctrl+c` to quit).
+
+| Action | Effect |
 | --- | --- |
-| ホイール | ポインタ下のペイン (ツリー / diff) をスクロール |
-| ツリーのクリック | ディレクトリ開閉 / ファイルへジャンプ |
-| `↑` / `↓` | ツリー上の前 / 次のファイルへジャンプ |
-| ファイルヘッダのクリック | ファイルの開閉 |
-| コード行のクリック | その行にコメント (入力中なら書きかけのまま対象行を切替) |
-| スレッド末尾の `Comment` | スレッドにコメントを追加 |
-| 入力欄の `Comment` / `Cancel` | 送信 / 取消 (`enter` でも送信、改行は `alt+enter` か `ctrl+j`) |
+| Wheel | Scroll the pane under the pointer (tree / diff) |
+| Click in the tree | Open / close a directory, or jump to a file |
+| `↑` / `↓` | Jump to the previous / next file in the tree |
+| Click a file header | Fold / unfold the file |
+| Click a code line | Comment on that line (while typing, switches the target line and keeps the draft) |
+| `Comment` at the end of a thread | Add a comment to the thread |
+| `Comment` / `Cancel` under the input | Send / discard (`enter` also sends; newline with `alt+enter` or `ctrl+j`) |
+| Base button in the footer | Diff against that base |
+| `Commit & Push` in the footer | Commit all changes and push |
 
-## 設定
+Thread comments wrap to the width of the diff pane.
 
-`$XDG_CONFIG_HOME/di/config.yaml` (未設定なら `~/.config/di/config.yaml`)
+## Config
+
+`$XDG_CONFIG_HOME/di/config.yaml` (`~/.config/di/config.yaml` if unset)
 
 ```yaml
 repos:
-  - repo: owner/name        # origin remote の owner/name
-    base: origin/develop    # 省略可
-    collapsed:              # デフォルトで畳むファイル (doublestar パターン, repo root からの相対パス)
+  - repo: owner/name        # owner/name of the origin remote
+    base: origin/develop    # optional
+    collapsed:              # files folded by default (doublestar patterns, relative to the repo root)
       - "**/*.pb.go"
       - "pnpm-lock.yaml"
       - "vendor/**"
 ```
 
-## Claude Code のセットアップ
+## Claude Code setup
 
 ```sh
 claude mcp add --scope user di -- ~/.local/bin/di mcp
 claude --dangerously-load-development-channels server:di
 ```
 
-2026-07-28 revision では channel が登録されないため、`di mcp` はそれより前の revision だけを受け付けます。
+The 2026-07-28 protocol revision does not register the channel, so `di mcp` only accepts earlier revisions.
 
-di でコメントを送ると Claude に channel 通知として届き、Claude は `reply_comment` で返信します。
-Claude に「生成コードは畳んで」などと頼むと `get_collapsed` / `set_collapsed` で config の collapsed を更新し、起動中の di に即反映されます
-(config は書き直されるため YAML のコメントは消えます。origin remote が無いリポジトリでは設定できません)。
+Comments you send from di reach Claude as channel notifications, and Claude replies with `reply_comment`.
+Ask Claude something like "fold the generated code" and it updates `collapsed` in the config via `get_collapsed` / `set_collapsed`, applied immediately to the running di
+(the config is rewritten, so YAML comments are lost; this is unavailable in repositories without an origin remote).
 
-channels を使わない場合は Claude に「di のコメントに対応して」と頼めば `list_comments` で取得します。
+Without channels, ask Claude to "handle the di comments" and it fetches them with `list_comments`.

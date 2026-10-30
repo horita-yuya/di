@@ -8,6 +8,7 @@ GitHub の "Files changed" をターミナルで。作業ブランチと target 
 ```
 di [--base <ref>]   # TUI を起動
 di mcp              # stdio MCP サーバー (Claude Code から起動される)
+di upgrade          # 最新リリースでバイナリを置き換える (git repo 外でも動く)
 ```
 
 ## Dependencies (これ以外は足さない)
@@ -27,6 +28,7 @@ internal/config         global config
 internal/thread         スレッド型 + TUI⇄mcp の socket パス
 internal/tui            bubbletea model
 internal/mcp            MCP サーバー
+internal/upgrade        `di upgrade` (stdlib のみ)
 ```
 
 ## internal/git
@@ -147,3 +149,12 @@ claude --dangerously-load-development-channels server:di
 ```
 (2026-07-28 revision では channel が登録されないため、`di mcp` は SupportedProtocolVersions でそれより前に限定する。
 relay は initialized を待たず stdio 接続時に開始する)
+
+## Release / upgrade
+
+- main への push ごとに release workflow が最新 `v*` tag の patch+1 を tag して push し、goreleaser でリリースする
+  (GITHUB_TOKEN で push した tag は workflow を起動しないのでループしない)。version は ldflags で `main.version` に入る (先頭の `v` 無し)。
+- asset 名は version 無し: `di_<GOOS>_<GOARCH>.tar.gz` (windows は zip) と `checksums.txt`。
+- `di upgrade`: API を使わず `releases/latest` の redirect 先 `.../tag/<tag>` から最新 tag を得る。`"v"+version` と同じなら何もしない。
+  archive と checksums.txt を取得して SHA-256 を照合し、tar.gz から `di` を取り出して実行中バイナリ (symlink 解決後) と同じディレクトリの
+  一時ファイルに書き、`os.Rename` で置き換える。Windows は非対応 (Releases から手動で入れ替える)。

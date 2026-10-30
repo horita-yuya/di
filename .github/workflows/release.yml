@@ -2,7 +2,11 @@ name: release
 
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -14,6 +18,13 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
+      # Tag the next patch version. Tags pushed with GITHUB_TOKEN don't trigger workflows.
+      - run: |
+          latest=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || echo v0.0.0)
+          IFS=. read -r major minor patch <<< "${latest#v}"
+          tag="v$major.$minor.$((patch + 1))"
+          git tag "$tag"
+          git push origin "$tag"
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
