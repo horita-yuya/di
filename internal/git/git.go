@@ -92,6 +92,22 @@ func (r *Repo) CommitPush(msg string) error {
 	return nil
 }
 
+// OpenPR opens the current branch's pull request in the browser, or the page to create one.
+func (r *Repo) OpenPR() error {
+	var err error
+	for _, sub := range []string{"view", "create"} {
+		cmd := exec.Command("gh", "pr", sub, "--web")
+		cmd.Dir = r.Root
+		if _, err = cmd.Output(); err == nil {
+			return nil
+		}
+	}
+	if ee, ok := errors.AsType[*exec.ExitError](err); ok {
+		return fmt.Errorf("gh pr create --web: %w: %s", err, strings.TrimSpace(string(ee.Stderr)))
+	}
+	return err
+}
+
 func git(dir string, args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir

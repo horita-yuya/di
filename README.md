@@ -30,6 +30,7 @@ Light theme only. While running, di switches the terminal background to white (O
 
 The footer has base buttons for the configured base, `origin/main` and `HEAD` (uncommitted changes only: staged, unstaged and untracked). Click one to choose the diff target.
 The footer's `Commit & Push` button opens the input for a commit message; `enter` or `Commit` runs `git add -A`, `git commit` and `git push -u origin HEAD`.
+The `Open PR` button opens the branch's pull request in the browser via `gh` (or the create page if none exists).
 An empty message uses the Unix timestamp. Errors are shown in the footer.
 
 ### Controls
@@ -47,6 +48,7 @@ Mouse driven (the keyboard only does `↑` / `↓` and `ctrl+c` to quit).
 | `Comment` / `Cancel` under the input | Send / discard (`enter` also sends; newline with `alt+enter` or `ctrl+j`) |
 | Base button in the footer | Diff against that base |
 | `Commit & Push` in the footer | Commit all changes and push |
+| `Open PR` in the footer | Open the branch's pull request (or the create page) in the browser |
 
 Thread comments wrap to the width of the diff pane. Files with an unanswered Claude reply (and closed folders containing them) are highlighted in the tree.
 

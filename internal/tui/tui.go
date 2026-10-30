@@ -100,6 +100,9 @@ type (
 // pushedMsg is the result of Commit & Push.
 type pushedMsg struct{ err error }
 
+// prMsg is the result of Open PR.
+type prMsg struct{ err error }
+
 type model struct {
 	repo  *git.Repo
 	slug  string
@@ -132,7 +135,7 @@ type model struct {
 	input   textarea.Model
 
 	pushing bool
-	pushErr error // kept apart from err, which every reload overwrites
+	pushErr error // Commit & Push / Open PR error, kept apart from err, which every reload overwrites
 
 	width, height int
 }
@@ -233,6 +236,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.gen++ // restarts the reload loop instead of starting a second one
 			return m, m.load
 		}
+	case prMsg:
+		m.pushErr = msg.err
 	case thread.Reply:
 		i := slices.IndexFunc(m.threads, func(t thread.Thread) bool { return t.ID == msg.ID })
 		if i < 0 {
@@ -313,6 +318,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.input.Placeholder = "Commit message (enter: commit & push, empty: timestamp)"
 				m.scroll()
 				return m, m.input.Focus()
+			}
+			x += lipgloss.Width(map[bool]string{false: " Commit & Push ", true: " Pushing… "}[m.pushing]) + 2
+			if mouse.X >= x && mouse.X < x+lipgloss.Width(" Open PR ") {
+				return m, func() tea.Msg { return prMsg{m.repo.OpenPR()} }
 			}
 		case mouse.Y >= h:
 			// Buttons under the textarea: " Comment " at x 0-8, " Cancel " at x 11-18.
@@ -719,7 +728,7 @@ func (m model) View() tea.View {
 		}
 		footer += " " + st.Render(" "+b+" ")
 	}
-	footer += "  " + buttonStyle.Render(map[bool]string{false: " Commit & Push ", true: " Pushing… "}[m.pushing])
+	footer += "  " + buttonStyle.Render(map[bool]string{false: " Commit & Push ", true: " Pushing… "}[m.pushing]) + "  " + buttonStyle.Render(" Open PR ")
 	footer += fmt.Sprintf("  %d files  +%d -%d", len(m.files), add, del)
 	if m.err != nil {
 		footer += "  │ " + errStyle.Render(m.err.Error())
