@@ -33,11 +33,11 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	sock, err := thread.SocketPath(repo.GitDir)
-	if err != nil {
-		return err
-	}
 	if len(os.Args) > 1 && os.Args[1] == "mcp" {
+		sock, err := thread.SocketPath(repo.GitDir)
+		if err != nil {
+			return err
+		}
 		return mcp.Serve(context.Background(), sock, repo.Slug())
 	}
 
@@ -53,5 +53,5 @@ func run() error {
 	if base == "" {
 		base = repo.DefaultBase()
 	}
-	return tui.Run(repo, sock, slug, rc, base)
+	return tui.Run(repo, slug, rc, base)
 }

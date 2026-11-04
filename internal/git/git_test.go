@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -178,6 +179,39 @@ func TestOpen(t *testing.T) {
 	}
 	if w.Branch() != "other" || r.Branch() != "main" {
 		t.Fatalf("Branch = %q, %q", w.Branch(), r.Branch())
+	}
+}
+
+func TestWorktrees(t *testing.T) {
+	r, run := repo(t, "main")
+	write(t, r, "a.txt", "a\n")
+	run("add", "-A")
+	run("commit", "-m", "init")
+	dir := t.TempDir()
+	run("worktree", "add", "-b", "one", filepath.Join(dir, "one"))
+	run("worktree", "add", "-b", "two", filepath.Join(dir, "two"))
+	run("worktree", "add", "-b", "gone", filepath.Join(dir, "gone"))
+	if err := os.RemoveAll(filepath.Join(dir, "gone")); err != nil { // prunable
+		t.Fatal(err)
+	}
+
+	from, err := Open(filepath.Join(dir, "two"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wts, err := from.Worktrees()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, w := range wts {
+		got = append(got, w.Branch())
+	}
+	if want := []string{"main", "one", "two"}; !slices.Equal(got, want) {
+		t.Fatalf("Worktrees = %v, want %v", got, want)
+	}
+	if *wts[0] != *r || *wts[2] != *from {
+		t.Fatalf("Worktrees = %+v %+v, want %+v %+v", wts[0], wts[2], r, from)
 	}
 }
 

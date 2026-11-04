@@ -34,6 +34,7 @@ internal/upgrade        `di upgrade` (stdlib のみ)
 ## internal/git
 
 - `Open(dir)` → `Repo{Root, GitDir}` (`git rev-parse --show-toplevel`, `--absolute-git-dir`)
+- `Worktrees()` → `git worktree list --porcelain` の各 `worktree <path>` を git の順で `Open` (自分自身も含む)。`bare` と開けないもの (ディレクトリの消えた prunable など) は飛ばす
 - `Slug()` → origin remote URL から `owner/name` (ssh/https 両対応, `.git` 除去)。remote 無しなら ""
 - `Branch()` → 現在のブランチ名
 - `DefaultBase()` → `git symbolic-ref --short refs/remotes/origin/HEAD` (例 `origin/main`)、失敗時 `main` → `master` の順で存在するもの
@@ -91,7 +92,10 @@ status は TUI の `status map[thread ID]string` にのみ持ち (mcp はキャ�
   自分の所有と確認できなければエラー終了 (他ユーザーによる socket の乗っ取り / 接続を防ぐ)
   (GitDir = `git rev-parse --absolute-git-dir` は worktree ごとに別 ⇒ **worktree ごとに独立**。
   sun_path 長制限 (macOS 104B) を避けるため GitDir 配下には置かない)
-- TUI が listen。起動時に dial して繋がれば「この worktree で di は起動済み」でエラー終了、繋がらなければ stale socket を消して listen。終了時に削除。
+- **1 つの di が repo の全 worktree を受け持つ** (socket は従来通り worktree ごと。各 worktree の Claude は自分の worktree の socket に繋ぐので `di mcp` とプロトコルは変わらない)。
+  起動時に `Worktrees()` の各 worktree の socket を dial し、繋がれば起動した worktree なら「この worktree で di は起動済み」でエラー終了、他の worktree なら飛ばす (別の di が担当)。
+  繋がらなければ stale socket を消して listen。worktree ごとに accept goroutine を持ち、受信したメッセージにその worktree を付けて `p.Send` する。終了時に全 socket を削除。
+  worktree の一覧は起動時のみ取得するので、後から `git worktree add` した worktree は di の再起動まで出ない。
 - プロトコル: 双方向 newline-delimited JSON (`json.Encoder`/`json.Decoder`)。各行は envelope
   - TUI → mcp: `ToMCP{thread?, resolved?, restore?}` を接続中の全 mcp へ broadcast
     - `thread`: ユーザーが新規コメント / 返信した時のスレッド全体。mcp が接続した時は「最後が user」のスレッドを全部送る。
@@ -112,6 +116,16 @@ git 実行は tea.Cmd 内 (goroutine) で行い UI をブロックしない。
 ## TUI
 
 左: ファイルツリー (幅 ~30%)、右: 全ファイルの diff を縦に連結 (GitHub と同じ)。`tab` でフォーカス切替。
+
+### Worktrees
+- worktree ごとの状態 (`worktree` struct: repo, branch, diff, スレッド・seq・status・restore note・接続中の mcp, fold 状態, rows/tree/スクロール位置, push 状態) と
+  共有の状態 (slug, config, base, gen, textarea, マウス位置, 画面サイズ) に分ける。model は表示中の `*worktree` を埋め込み、全 worktree を `wts` に持つ。
+- goroutine からのメッセージ (mcp の接続/切断/受信, Commit & Push / Open PR の結果) は対象の worktree を持ち、表示中でなくてもその worktree に反映する (再構築は表示中の時だけ)。
+- 左ペイン最上部に Worktrees セクション (worktree が 2 つ以上の時だけ。1 つなら従来と同じ見た目)。AI Replies と同じグレーのタイトル行の下に
+  worktree ごとに 接続マーク (mcp 接続中は緑 `●`、無ければ dim `○`) + branch (空なら root のディレクトリ名) + 未回答の Claude 返信数 `●N` を 1 行で表示。
+  表示中の worktree はツリーのカーソルと同じハイライト。高さは左ペインの 1/3 まで (はみ出しは非表示)、その下がツリーと AI Replies パネル。
+- 行のクリックでその worktree に切り替える: gen を上げ (旧 worktree の読み込みと tick chain を捨てる)、textarea を閉じ、再構築して読み込みを始める。
+  footer (接続表示, branch, Commit & Push, Open PR) は表示中の worktree に対して動く。
 
 ### Tree
 - ディレクトリ階層。ファイル行は `+N -M` を表示。

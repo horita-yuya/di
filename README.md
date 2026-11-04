@@ -24,7 +24,7 @@ di upgrade          # replace this binary with the latest release
 ```
 
 The diff runs from the merge-base with base to the working tree (including uncommitted and untracked files) and refreshes every second.
-Comment threads live only inside the di process and are gone when di exits; after a restart, the `Restore` button in the empty AI Replies panel asks Claude to send them back from its conversation. You can run one di per worktree.
+Comment threads live only inside the di process and are gone when di exits; after a restart, the `Restore` button in the empty AI Replies panel asks Claude to send them back from its conversation. One di serves every worktree of the repository it was started in (each worktree's Claude still connects to that worktree's socket): with more than one, a Worktrees section at the top of the left pane lists them with their branch, a `●` when Claude is connected and `●N` for unanswered Claude replies, and clicking one shows its diff, threads and connection. Worktrees are listed at startup, so restart di after adding one; a worktree already served by another di is left to it.
 
 Light theme only. While running, di switches the terminal background to white (OSC 10/11) and restores it on exit (OSC 110/111).
 
@@ -39,6 +39,7 @@ Mouse driven (the keyboard only does `↑` / `↓` and `ctrl+c` to quit).
 
 | Action | Effect |
 | --- | --- |
+| Click a worktree (top of the left pane) | Show that worktree's diff, threads and Claude connection |
 | Wheel | Scroll the pane under the pointer (tree / diff) |
 | Click in the tree | Open / close a directory, or jump to a file (its arrow folds / unfolds the file) |
 | `↑` / `↓` | Jump to the previous / next file in the tree |

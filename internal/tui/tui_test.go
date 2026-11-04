@@ -13,6 +13,7 @@ import (
 	"github.com/bluekeyes/go-gitdiff/gitdiff"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/horita-yuya/di/internal/config"
+	"github.com/horita-yuya/di/internal/git"
 	"github.com/horita-yuya/di/internal/thread"
 )
 
@@ -44,7 +45,8 @@ func newModel(t *testing.T) (model, <-chan thread.ToMCP) {
 			sent <- msg
 		}
 	}()
-	m := model{files: files, input: textarea.New(), collapsed: map[string]bool{}, open: map[string]bool{}, status: map[string]string{}, peers: []net.Conn{tuiEnd}}
+	m := model{worktree: &worktree{files: files, collapsed: map[string]bool{}, open: map[string]bool{}, status: map[string]string{}, peers: []net.Conn{tuiEnd}},
+		input: textarea.New()}
 	m = update(m, tea.WindowSizeMsg{Width: 100, Height: 30})
 	return m, sent
 }
@@ -100,7 +102,7 @@ func TestCommentReplyResolveRestore(t *testing.T) {
 	id := m.threads[0].ID
 
 	// Claude's reply lists the thread under the tree.
-	m = update(m, thread.ToTUI{Reply: &thread.Reply{ID: id, Body: "because"}})
+	m = update(m, peerData{m.worktree, thread.ToTUI{Reply: &thread.Reply{ID: id, Body: "because"}}})
 	if len(m.replies()) != 1 || m.treeHeight() >= m.bodyHeight() {
 		t.Fatalf("replies=%v treeHeight=%d", m.replies(), m.treeHeight())
 	}
@@ -121,7 +123,7 @@ func TestCommentReplyResolveRestore(t *testing.T) {
 	restored := thread.Thread{ID: "9999999999", File: "a.go", Side: "new", Line: 2, LineText: "TWO",
 		Messages: []thread.Message{{Author: "user", Body: "why?"}, {Author: "claude", Body: "because"}}}
 	for range 2 {
-		m = update(m, thread.ToTUI{Restore: []thread.Thread{restored, {ID: "1"}}})
+		m = update(m, peerData{m.worktree, thread.ToTUI{Restore: []thread.Thread{restored, {ID: "1"}}}})
 	}
 	if len(m.threads) != 1 || m.seq != 9999999999 {
 		t.Fatalf("threads=%v seq=%d", m.threads, m.seq)
@@ -167,10 +169,10 @@ func TestRestoreButton(t *testing.T) {
 	}
 	// A restored thread awaiting Claude is not in the panel, so the note says it arrived.
 	waiting := thread.Thread{ID: "1", File: "a.go", Side: "new", Line: 2, LineText: "TWO", Messages: []thread.Message{{Author: "user", Body: "why?"}}}
-	if m = update(m, thread.ToTUI{Restore: []thread.Thread{waiting}}); !strings.Contains(panel(m), "restored 1") {
+	if m = update(m, peerData{m.worktree, thread.ToTUI{Restore: []thread.Thread{waiting}}}); !strings.Contains(panel(m), "restored 1") {
 		t.Fatalf("panel %q", panel(m))
 	}
-	if m = update(m, thread.ToTUI{Restore: []thread.Thread{}}); !strings.Contains(panel(m), "nothing to restore") {
+	if m = update(m, peerData{m.worktree, thread.ToTUI{Restore: []thread.Thread{}}}); !strings.Contains(panel(m), "nothing to restore") {
 		t.Fatalf("panel %q", panel(m))
 	}
 	m = click(m, 2, m.treeHeight()+1)
@@ -186,8 +188,8 @@ func TestRestoreButton(t *testing.T) {
 
 func TestControlCharactersNotRendered(t *testing.T) {
 	m := modelOf(t, strings.Replace(diff, "+TWO", "+TWO\x1b]52;c;ZGlmZg==\x07", 1), config.RepoConfig{})
-	m = update(m, thread.ToTUI{Restore: []thread.Thread{{ID: "1", File: "a.go", Side: "new", Line: 1, LineText: "one",
-		Messages: []thread.Message{{Author: "user", Body: "why?"}, {Author: "claude", Body: "ok\x1b]52;c;cmVwbHk=\x07\x9b2J"}}}}})
+	m = update(m, peerData{m.worktree, thread.ToTUI{Restore: []thread.Thread{{ID: "1", File: "a.go", Side: "new", Line: 1, LineText: "one",
+		Messages: []thread.Message{{Author: "user", Body: "why?"}, {Author: "claude", Body: "ok\x1b]52;c;cmVwbHk=\x07\x9b2J"}}}}}})
 	v := m.View().Content
 	for _, payload := range []string{"]52;c;ZGlmZg==", "]52;c;cmVwbHk="} {
 		if strings.Contains(v, "\x1b"+payload) || !strings.Contains(v, "�"+payload) {
@@ -201,30 +203,88 @@ func TestControlCharactersNotRendered(t *testing.T) {
 
 func TestStatus(t *testing.T) {
 	m, _ := newModel(t)
-	m = update(m, thread.ToTUI{Restore: []thread.Thread{{ID: "1", File: "a.go", Side: "new", Line: 2, LineText: "TWO", Messages: user("why?")}}})
+	m = update(m, peerData{m.worktree, thread.ToTUI{Restore: []thread.Thread{{ID: "1", File: "a.go", Side: "new", Line: 2, LineText: "TWO", Messages: user("why?")}}}})
 	header := func(m model) string {
 		return m.rows[slices.IndexFunc(m.rows, func(r row) bool { return r.kind == rowThread })].text
 	}
 	if got := header(m); got != "💬 [waiting for Claude] " {
 		t.Fatalf("header %q", got)
 	}
-	m = update(m, thread.ToTUI{Status: &thread.Status{ID: "2", Text: "ghost"}})
+	m = update(m, peerData{m.worktree, thread.ToTUI{Status: &thread.Status{ID: "2", Text: "ghost"}}})
 	if _, ok := m.status["2"]; ok {
 		t.Fatal("status kept for an unknown thread")
 	}
-	m = update(m, thread.ToTUI{Status: &thread.Status{ID: "1", Text: "reading\ntui.go"}})
+	m = update(m, peerData{m.worktree, thread.ToTUI{Status: &thread.Status{ID: "1", Text: "reading\ntui.go"}}})
 	if got := header(m); got != "💬 [AI: reading tui.go…] " || !strings.Contains(ansi.Strip(m.View().Content), "[AI: reading tui.go…]") {
 		t.Fatalf("header %q", got)
 	}
 
 	// A reply clears it, and so does resolving.
-	m = update(m, thread.ToTUI{Reply: &thread.Reply{ID: "1", Body: "because"}})
+	m = update(m, peerData{m.worktree, thread.ToTUI{Reply: &thread.Reply{ID: "1", Body: "because"}}})
 	if _, ok := m.status["1"]; ok || header(m) != "💬 [Claude replied] " {
 		t.Fatalf("status %v header %q", m.status, header(m))
 	}
-	m = update(m, thread.ToTUI{Status: &thread.Status{ID: "1", Text: "editing"}})
+	m = update(m, peerData{m.worktree, thread.ToTUI{Status: &thread.Status{ID: "1", Text: "editing"}}})
 	m = click(m, 2, m.treeHeight()+1) // Resolve
 	if len(m.threads) != 0 || len(m.status) != 0 {
 		t.Fatalf("threads %v status %v", m.threads, m.status)
+	}
+}
+
+func TestWorktrees(t *testing.T) {
+	m, sent := newModel(t)
+	if v := ansi.Strip(m.View().Content); strings.Contains(v, "Worktrees") {
+		t.Fatalf("a single worktree shows the section:\n%s", v)
+	}
+	// Thread IDs are per worktree, so both have a thread 7.
+	waiting := thread.Thread{ID: "7", File: "a.go", Side: "new", Line: 2, LineText: "TWO", Messages: user("why?")}
+	m = update(m, peerData{m.worktree, thread.ToTUI{Restore: []thread.Thread{waiting}}})
+	other := &worktree{repo: &git.Repo{Root: "/src/other"}, branch: "feature", raw: twoDirs, files: parse(t, twoDirs),
+		collapsed: map[string]bool{}, open: map[string]bool{}, status: map[string]string{}, threads: []thread.Thread{waiting}}
+	m.repo, m.branch, m.wts = &git.Repo{Root: "/src/main"}, "main", []*worktree{m.worktree, other}
+	m = update(m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	lines := func(m model) []string { return strings.Split(ansi.Strip(m.View().Content), "\n") }
+	wh := m.wtHeight()
+	if l := lines(m); wh != 3 || !strings.HasPrefix(l[0], " Worktrees") || !strings.HasPrefix(l[1], "▌● main") || !strings.HasPrefix(l[2], " ○ feature") {
+		t.Fatalf("wtHeight=%d section:\n%s", wh, strings.Join(l[:3], "\n"))
+	}
+
+	// A reply to the other worktree badges its row and leaves this one's thread 7 alone.
+	m = update(m, peerData{other, thread.ToTUI{Reply: &thread.Reply{ID: "7", Body: "because"}}})
+	if l := lines(m); !strings.HasPrefix(l[2], " ○ feature ●1") || len(m.threads[0].Messages) != 1 || len(m.replies()) != 0 {
+		t.Fatalf("row %q, this worktree's thread %v", l[2], m.threads[0])
+	}
+
+	// The left pane below the section maps as before: the tree's file arrow, then the AI Replies panel.
+	if m = click(m, 1, wh); !m.collapsed["a.go"] {
+		t.Fatal("tree arrow did not fold")
+	}
+	if m = click(m, 2, wh+m.treeHeight()+1); !(<-sent).Restore {
+		t.Fatal("Restore not clicked")
+	}
+	m = update(m, peerData{m.worktree, thread.ToTUI{Reply: &thread.Reply{ID: "7", Body: "ok"}}})
+	if m = click(m, 2, wh+m.treeHeight()+1); len(m.threads) != 0 || (<-sent).Resolved != "7" {
+		t.Fatalf("Resolve not clicked: %v", m.threads)
+	}
+
+	// The title and the current row do nothing; another row switches to that worktree, closing the textarea.
+	for _, y := range []int{0, 1} {
+		if m = click(m, 2, y); m.worktree == other {
+			t.Fatalf("click on row %d switched", y)
+		}
+	}
+	m.editing, m.commit = true, true
+	gen := m.gen
+	m = click(m, 2, 2)
+	if m.worktree != other || m.gen == gen || m.editing || m.commit || m.header("gen/b.pb.go") < 0 {
+		t.Fatalf("not switched: editing=%v commit=%v rows=%d", m.editing, m.commit, len(m.rows))
+	}
+	if l := lines(m); !strings.HasPrefix(l[1], " ● main") || !strings.HasPrefix(l[2], "▌○ feature ●1") ||
+		!strings.Contains(l[len(l)-1], "○ Claude not connected  feature ←") {
+		t.Fatalf("section / footer after switching:\n%s\n%s", strings.Join(l[:3], "\n"), l[len(l)-1])
+	}
+	// A load of the previous worktree, still in flight, is dropped.
+	if m = update(m, loadedMsg{raw: diff, files: parse(t, diff), gen: gen}); m.raw != twoDirs {
+		t.Fatal("stale load applied")
 	}
 }

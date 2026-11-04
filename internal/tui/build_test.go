@@ -25,7 +25,8 @@ func parse(t *testing.T, raw string) []*gitdiff.File {
 
 // modelOf returns a 100x30 model showing raw (files sorted by path, as load does), without Claude.
 func modelOf(t *testing.T, raw string, cfg config.RepoConfig) model {
-	m := model{raw: raw, files: parse(t, raw), cfg: cfg, input: textarea.New(), collapsed: map[string]bool{}, open: map[string]bool{}, status: map[string]string{}}
+	m := model{worktree: &worktree{raw: raw, files: parse(t, raw), collapsed: map[string]bool{}, open: map[string]bool{}, status: map[string]string{}},
+		cfg: cfg, input: textarea.New()}
 	return update(m, tea.WindowSizeMsg{Width: 100, Height: 30})
 }
 
@@ -49,7 +50,7 @@ func TestOutdatedThread(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			m := modelOf(t, diff, config.RepoConfig{})
-			m = update(m, thread.ToTUI{Restore: []thread.Thread{th}})
+			m = update(m, peerData{m.worktree, thread.ToTUI{Restore: []thread.Thread{th}}})
 			if i := slices.IndexFunc(m.rows, func(r row) bool { return r.kind == rowLine && r.text == "TWO" }); m.rows[i+1].kind != rowThread {
 				t.Fatalf("thread not below its line: %+v", m.rows[i+1])
 			}
@@ -128,8 +129,8 @@ func TestRepliesInClosedDirectory(t *testing.T) {
 		t.Fatalf("tree %v, gen open=%v; want gen closed", got, m.open["gen"])
 	}
 
-	m = update(m, thread.ToTUI{Restore: []thread.Thread{{ID: "5", File: "gen/b.pb.go", Side: "new", Line: 1, LineText: "B",
-		Messages: []thread.Message{{Author: "user", Body: "why?"}, {Author: "claude", Body: "generated\nsecond line"}}}}})
+	m = update(m, peerData{m.worktree, thread.ToTUI{Restore: []thread.Thread{{ID: "5", File: "gen/b.pb.go", Side: "new", Line: 1, LineText: "B",
+		Messages: []thread.Message{{Author: "user", Body: "why?"}, {Author: "claude", Body: "generated\nsecond line"}}}}}})
 
 	// The closed directory holding the replied file is highlighted like the thread; other rows are not.
 	hl, _, _ := strings.Cut(threadStyle.Render("x"), "x")
@@ -186,13 +187,13 @@ func TestTopRowStays(t *testing.T) {
 	th := thread.Thread{ID: "1", File: "a.go", Side: "new", Line: 2, LineText: "LINE 2", Messages: user("why?")}
 	for name, change := range map[string]func(*testing.T, model) model{
 		"reply": func(t *testing.T, m model) model {
-			return update(m, thread.ToTUI{Reply: &thread.Reply{ID: "1", Body: "because\nof\nthis"}})
+			return update(m, peerData{m.worktree, thread.ToTUI{Reply: &thread.Reply{ID: "1", Body: "because\nof\nthis"}}})
 		},
 		"code edit above": func(t *testing.T, m model) model { return reload(t, m, long(true)) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			m := modelOf(t, long(false), config.RepoConfig{})
-			m = update(m, thread.ToTUI{Restore: []thread.Thread{th}})
+			m = update(m, peerData{m.worktree, thread.ToTUI{Restore: []thread.Thread{th}}})
 			m.offset = slices.IndexFunc(m.rows, func(r row) bool { return r.text == "line 10" })
 			m = change(t, m)
 			if got := m.rows[m.offset].text; got != "line 10" {

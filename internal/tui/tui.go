@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -96,26 +97,37 @@ type loadedMsg struct {
 	gen    int
 }
 
-// peerMsg is a newly connected `di mcp` (one per Claude Code session); peerGoneMsg is one that disconnected.
+// Messages from goroutines carry the worktree they are for, which need not be the one shown.
 type (
-	peerMsg     struct{ conn net.Conn }
-	peerGoneMsg struct{ conn net.Conn }
+	// peerMsg is a newly connected `di mcp` (one per Claude Code session); peerGoneMsg is one that disconnected.
+	peerMsg struct {
+		wt   *worktree
+		conn net.Conn
+	}
+	peerGoneMsg struct {
+		wt   *worktree
+		conn net.Conn
+	}
+	// peerData is a message from a `di mcp`.
+	peerData struct {
+		wt *worktree
+		thread.ToTUI
+	}
+	// pushedMsg is the result of Commit & Push.
+	pushedMsg struct {
+		wt  *worktree
+		err error
+	}
+	// prMsg is the result of Open PR.
+	prMsg struct {
+		wt  *worktree
+		err error
+	}
 )
 
-// pushedMsg is the result of Commit & Push.
-type pushedMsg struct{ err error }
-
-// prMsg is the result of Open PR.
-type prMsg struct{ err error }
-
-type model struct {
-	repo  *git.Repo
-	slug  string
-	cfg   config.RepoConfig
-	base  string
-	bases []string // diff targets selectable in the footer: the configured base, origin/main and HEAD (uncommitted changes)
-	gen   int      // bumped on base change so in-flight loads for the old base are dropped
-
+// worktree is the state of one worktree of the repo. di shows one at a time and serves the threads of all.
+type worktree struct {
+	repo   *git.Repo
 	branch string
 	raw    string
 	files  []*gitdiff.File
@@ -133,8 +145,23 @@ type model struct {
 	rows               []row
 	tree               []node // visible nodes
 	offset, treeOffset int    // first visible row / tree node
-	mouseX, mouseY     int
 	current            string // file highlighted in the tree
+
+	pushing bool
+	pushErr error // Commit & Push / Open PR error, kept apart from err, which every reload overwrites
+}
+
+type model struct {
+	*worktree             // the one shown
+	wts       []*worktree // all served, in git's order
+
+	slug  string
+	cfg   config.RepoConfig
+	base  string
+	bases []string // diff targets selectable in the footer: the configured base, origin/main and HEAD (uncommitted changes)
+	gen   int      // bumped on base or worktree change so in-flight loads for the old ones are dropped
+
+	mouseX, mouseY int
 
 	editing bool
 	commit  bool   // the textarea holds a commit message instead of a comment
@@ -142,52 +169,78 @@ type model struct {
 	target  row
 	input   textarea.Model
 
-	pushing bool
-	pushErr error // Commit & Push / Open PR error, kept apart from err, which every reload overwrites
-
 	width, height int
 }
 
-func Run(repo *git.Repo, sock, slug string, cfg config.RepoConfig, base string) error {
-	if c, err := net.Dial("unix", sock); err == nil {
-		c.Close()
-		return errors.New("di is already running in this worktree")
-	}
-	os.Remove(sock) // stale socket from a crashed di
-	ln, err := net.Listen("unix", sock)
+// Run serves each worktree of repo's repository that no other di serves, on its own socket, and shows repo first.
+func Run(repo *git.Repo, slug string, cfg config.RepoConfig, base string) error {
+	repos, err := repo.Worktrees()
 	if err != nil {
 		return err
 	}
-	defer ln.Close() // also removes the socket file
-
 	input := textarea.New()
 	input.SetStyles(textarea.DefaultLightStyles())
 	input.SetVirtualCursor(false) // View places the real cursor, where the terminal draws IME preedit
 	input.KeyMap.InsertNewline.SetKeys("alt+enter", "ctrl+j")
 	input.ShowLineNumbers = false
 	input.SetHeight(5)
-	p := tea.NewProgram(model{repo: repo, slug: slug, cfg: cfg, base: base, bases: slices.Compact([]string{base, "origin/main", "HEAD"}), input: input,
-		collapsed: map[string]bool{}, open: map[string]bool{}, status: map[string]string{},
-		seq: int(time.Now().Unix())}) // new IDs stay above those of threads restored from an earlier run
-	go func() {
-		for {
-			c, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			p.Send(peerMsg{c})
-			go func() {
-				defer func() { c.Close(); p.Send(peerGoneMsg{c}) }()
-				for dec := json.NewDecoder(c); ; {
-					var msg thread.ToTUI
-					if dec.Decode(&msg) != nil {
-						return
-					}
-					p.Send(msg)
-				}
-			}()
+	m := model{slug: slug, cfg: cfg, base: base, bases: slices.Compact([]string{base, "origin/main", "HEAD"}), input: input}
+	var lns []net.Listener // lns[i] serves m.wts[i]
+	defer func() {
+		for _, ln := range lns {
+			ln.Close() // also removes the socket file
 		}
 	}()
+	for _, r := range repos {
+		sock, err := thread.SocketPath(r.GitDir)
+		if err != nil {
+			return err
+		}
+		if c, err := net.Dial("unix", sock); err == nil {
+			c.Close()
+			if r.GitDir == repo.GitDir {
+				return errors.New("di is already running in this worktree")
+			}
+			continue // another di serves it
+		}
+		os.Remove(sock) // stale socket from a crashed di
+		ln, err := net.Listen("unix", sock)
+		if err != nil {
+			return err
+		}
+		lns = append(lns, ln)
+		m.wts = append(m.wts, &worktree{repo: r, branch: r.Branch(), collapsed: map[string]bool{}, open: map[string]bool{}, status: map[string]string{},
+			seq: int(time.Now().Unix())}) // new IDs stay above those of threads restored from an earlier run
+		if r.GitDir == repo.GitDir {
+			m.worktree = m.wts[len(m.wts)-1]
+		}
+	}
+	if m.worktree == nil {
+		return fmt.Errorf("%s is not in git worktree list", repo.Root)
+	}
+	p := tea.NewProgram(m)
+	for i, ln := range lns {
+		wt := m.wts[i]
+		go func() {
+			for {
+				c, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				p.Send(peerMsg{wt, c})
+				go func() {
+					defer func() { c.Close(); p.Send(peerGoneMsg{wt, c}) }()
+					for dec := json.NewDecoder(c); ; {
+						var msg thread.ToTUI
+						if dec.Decode(&msg) != nil {
+							return
+						}
+						p.Send(peerData{wt, msg})
+					}
+				}()
+			}
+		}()
+	}
 	_, err = p.Run()
 	return err
 }
@@ -230,49 +283,52 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.build()
 		return m, next
 	case peerMsg:
-		m.peers = append(m.peers, msg.conn)
-		for _, t := range m.threads {
+		msg.wt.peers = append(msg.wt.peers, msg.conn)
+		for _, t := range msg.wt.threads {
 			if t.Messages[len(t.Messages)-1].Author == "user" {
 				json.NewEncoder(msg.conn).Encode(thread.ToMCP{Thread: &t})
 			}
 		}
 	case peerGoneMsg:
-		m.peers = slices.DeleteFunc(m.peers, func(c net.Conn) bool { return c == msg.conn })
+		msg.wt.peers = slices.DeleteFunc(msg.wt.peers, func(c net.Conn) bool { return c == msg.conn })
 	case pushedMsg:
-		m.pushing, m.pushErr = false, msg.err
-		if msg.err == nil {
+		msg.wt.pushing, msg.wt.pushErr = false, msg.err
+		if msg.err == nil && msg.wt == m.worktree {
 			m.gen++ // restarts the reload loop instead of starting a second one
 			return m, m.load
 		}
 	case prMsg:
-		m.pushErr = msg.err
-	case thread.ToTUI:
+		msg.wt.pushErr = msg.err
+	case peerData:
+		wt := msg.wt
 		if r := msg.Reply; r != nil {
-			if i := slices.IndexFunc(m.threads, func(t thread.Thread) bool { return t.ID == r.ID }); i >= 0 {
-				m.threads[i].Messages = append(m.threads[i].Messages, thread.Message{Author: "claude", Body: r.Body})
+			if i := slices.IndexFunc(wt.threads, func(t thread.Thread) bool { return t.ID == r.ID }); i >= 0 {
+				wt.threads[i].Messages = append(wt.threads[i].Messages, thread.Message{Author: "claude", Body: r.Body})
 			}
-			delete(m.status, r.ID)
+			delete(wt.status, r.ID)
 		}
-		if s := msg.Status; s != nil && slices.ContainsFunc(m.threads, func(t thread.Thread) bool { return t.ID == s.ID }) {
-			m.status[s.ID] = s.Text
+		if s := msg.Status; s != nil && slices.ContainsFunc(wt.threads, func(t thread.Thread) bool { return t.ID == s.ID }) {
+			wt.status[s.ID] = s.Text
 		}
 		if msg.Restore != nil {
 			added := 0
 			for _, t := range msg.Restore {
 				n, _ := strconv.Atoi(t.ID)
-				m.seq = max(m.seq, n)
-				if len(t.Messages) > 0 && !slices.ContainsFunc(m.threads, func(u thread.Thread) bool { return u.ID == t.ID }) {
-					m.threads = append(m.threads, t)
+				wt.seq = max(wt.seq, n)
+				if len(t.Messages) > 0 && !slices.ContainsFunc(wt.threads, func(u thread.Thread) bool { return u.ID == t.ID }) {
+					wt.threads = append(wt.threads, t)
 					added++
 				}
 			}
 			// Restored threads awaiting Claude don't show in the panel, so it says what happened.
-			m.restoreNote = fmt.Sprintf(" restored %d", added)
+			wt.restoreNote = fmt.Sprintf(" restored %d", added)
 			if added == 0 {
-				m.restoreNote = " nothing to restore"
+				wt.restoreNote = " nothing to restore"
 			}
 		}
-		m.build()
+		if wt == m.worktree {
+			m.build()
+		}
 	case tea.PasteMsg:
 		if m.editing {
 			var cmd tea.Cmd
@@ -310,7 +366,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		_, click := msg.(tea.MouseClickMsg)
 		mouse := msg.Mouse()
 		m.mouseX, m.mouseY = mouse.X, mouse.Y
-		treeW, h, scr := m.width*3/10, m.bodyHeight(), m.screen()
+		treeW, h, wh, scr := m.width*3/10, m.bodyHeight(), m.wtHeight(), m.screen()
 		inTree := mouse.X < treeW
 		// The input's buttons, " Comment " at x 0-8 and " Cancel " at x 11-18: under the body in commit mode,
 		// on the inline box's last line (indented to the code text) in comment mode.
@@ -356,7 +412,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			x += lipgloss.Width(map[bool]string{false: " Commit & Push ", true: " Pushing… "}[m.pushing]) + 2
 			if mouse.X >= x && mouse.X < x+lipgloss.Width(" Open PR ") {
-				return m, func() tea.Msg { return prMsg{m.repo.OpenPR()} }
+				return m, func() tea.Msg { return prMsg{m.worktree, m.repo.OpenPR()} }
 			}
 		case m.editing && mouse.Y == by && (m.commit || slices.Contains(scr, -1)):
 			switch x := mouse.X - bx; {
@@ -369,8 +425,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.scroll()
 			}
 		case mouse.Y >= h: // the commit message input
-		case inTree && mouse.Y < m.treeHeight():
-			if i := m.treeOffset + mouse.Y; i < len(m.tree) {
+		case inTree && mouse.Y < wh: // the Worktrees section: a title row, then a row per worktree
+			if mouse.Y > 0 && m.wts[mouse.Y-1] != m.worktree {
+				m.worktree = m.wts[mouse.Y-1]
+				m.gen++ // drops the old worktree's loads, ending its reload loop
+				m.editing, m.commit = false, false
+				m.input.Reset()
+				m.build()
+				return m, m.load
+			}
+		case inTree && mouse.Y < wh+m.treeHeight():
+			if i := m.treeOffset + mouse.Y - wh; i < len(m.tree) {
 				n := m.tree[i]
 				switch {
 				case n.dir:
@@ -386,7 +451,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case inTree:
 			// AI Replies panel: a title row, then 2 rows per thread with " Resolve " at x 0-8 on the first,
 			// or " Restore " at x 0-8 when there are none.
-			y, rs := mouse.Y-m.treeHeight()-1, m.replies()
+			y, rs := mouse.Y-wh-m.treeHeight()-1, m.replies()
 			if len(rs) == 0 && y == 0 && mouse.X < 9 {
 				if len(m.peers) == 0 {
 					m.pushErr = errors.New("Claude not connected")
@@ -447,7 +512,7 @@ func (m *model) submit() tea.Cmd {
 		m.commit, m.pushing, m.pushErr = false, true, nil
 		m.scroll()
 		return func() tea.Msg {
-			return pushedMsg{m.repo.CommitPush(cmp.Or(body, strconv.FormatInt(time.Now().Unix(), 10)))}
+			return pushedMsg{m.worktree, m.repo.CommitPush(cmp.Or(body, strconv.FormatInt(time.Now().Unix(), 10)))}
 		}
 	}
 	if body == "" {
@@ -482,8 +547,8 @@ func (m *model) submit() tea.Cmd {
 }
 
 // broadcast sends msg to every connected `di mcp`, dropping peers that went away.
-func (m *model) broadcast(msg thread.ToMCP) {
-	m.peers = slices.DeleteFunc(m.peers, func(c net.Conn) bool { return json.NewEncoder(c).Encode(msg) != nil })
+func (w *worktree) broadcast(msg thread.ToMCP) {
+	w.peers = slices.DeleteFunc(w.peers, func(c net.Conn) bool { return json.NewEncoder(c).Encode(msg) != nil })
 }
 
 // build regenerates rows and the visible tree from files, threads and fold state,
@@ -686,16 +751,25 @@ func (m model) screen() []int {
 }
 
 // replies are the threads waiting on the user: Claude wrote the last message.
-func (m model) replies() []thread.Thread {
-	return slices.DeleteFunc(slices.Clone(m.threads), func(t thread.Thread) bool {
+func (w *worktree) replies() []thread.Thread {
+	return slices.DeleteFunc(slices.Clone(w.threads), func(t thread.Thread) bool {
 		return t.Messages[len(t.Messages)-1].Author != "claude"
 	})
 }
 
-// treeHeight is the tree's share of the left pane; the AI Replies panel takes the rest, up to half:
-// a title row, then 2 rows per reply or the Restore row when there are none.
+// wtHeight is the Worktrees section's share of the top of the left pane, up to a third: a title row, then a row
+// per worktree. A single worktree has none.
+func (m model) wtHeight() int {
+	if len(m.wts) < 2 {
+		return 0
+	}
+	return min(1+len(m.wts), m.bodyHeight()/3)
+}
+
+// treeHeight is the tree's share of the left pane below the Worktrees section; the AI Replies panel takes the rest,
+// up to half: a title row, then 2 rows per reply or the Restore row when there are none.
 func (m model) treeHeight() int {
-	h := m.bodyHeight()
+	h := m.bodyHeight() - m.wtHeight()
 	return h - min(max(2, 1+2*len(m.replies())), h/2)
 }
 
@@ -712,8 +786,27 @@ func (m model) View() tea.View {
 	treeW := m.width * 3 / 10
 	diffW := m.diffWidth()
 
-	rs, th := m.replies(), m.treeHeight()
+	rs, wh, th := m.replies(), m.wtHeight(), m.treeHeight()
 	var tree []string
+	if wh > 0 {
+		tree = append(tree, headerStyle.Inline(true).Width(treeW).MaxWidth(treeW).Render(" Worktrees"))
+	}
+	for _, w := range m.wts[:max(0, wh-1)] {
+		// The branch, Claude's unanswered replies there and whether Claude is connected to it.
+		name, mark, st, badge := printable(cmp.Or(w.branch, filepath.Base(w.repo.Root))), "○", dimStyle, ""
+		if len(w.peers) > 0 {
+			mark, st = "●", addStyle
+		}
+		if n := len(w.replies()); n > 0 {
+			badge = fmt.Sprintf(" ●%d", n)
+		}
+		if w == m.worktree { // plain: inner colors would cut the row background
+			tree = append(tree, lipgloss.NewStyle().Foreground(lipgloss.Color("#1f2328")).Background(cursorBg).Inline(true).Width(treeW).MaxWidth(treeW).
+				Render("▌"+mark+" "+name+badge))
+			continue
+		}
+		tree = append(tree, lipgloss.NewStyle().Inline(true).MaxWidth(treeW).Render(" "+st.Render(mark)+" "+name+threadStyle.Render(badge)))
+	}
 	for _, n := range m.tree[m.treeOffset:min(len(m.tree), m.treeOffset+th)] {
 		cur := !n.dir && n.path == m.current
 		hl := slices.ContainsFunc(rs, func(t thread.Thread) bool {
@@ -763,7 +856,7 @@ func (m model) View() tea.View {
 		tree = append(tree, st.Inline(true).Width(treeW).MaxWidth(treeW).Render(text))
 	}
 	w := max(0, treeW-9)
-	tree = append(tree, slices.Repeat([]string{""}, th-len(tree))...)
+	tree = append(tree, slices.Repeat([]string{""}, wh+th-len(tree))...)
 	tree = append(tree, headerStyle.Inline(true).Width(treeW).MaxWidth(treeW).Render(fmt.Sprintf(" AI Replies (%d)", len(rs))))
 	if len(rs) == 0 {
 		tree = append(tree, buttonStyle.Render(" Restore ")+dimStyle.Inline(true).MaxWidth(w).Render(cmp.Or(m.restoreNote, " ask Claude to restore threads")))

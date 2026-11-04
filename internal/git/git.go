@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"slices"
 	"strings"
 
 	"github.com/bluekeyes/go-gitdiff/gitdiff"
@@ -22,6 +23,27 @@ func Open(dir string) (*Repo, error) {
 	}
 	root, gitDir, _ := strings.Cut(strings.TrimSpace(out), "\n")
 	return &Repo{Root: root, GitDir: gitDir}, nil
+}
+
+// Worktrees returns the repository's worktrees in git's order, this one included. Bare entries and
+// worktrees that can't be opened, e.g. a prunable one whose directory is gone, are skipped.
+func (r *Repo) Worktrees() ([]*Repo, error) {
+	out, err := git(r.Root, "worktree", "list", "--porcelain")
+	if err != nil {
+		return nil, err
+	}
+	var wts []*Repo
+	for entry := range strings.SplitSeq(strings.TrimSpace(out), "\n\n") {
+		lines := strings.Split(entry, "\n")
+		dir, ok := strings.CutPrefix(lines[0], "worktree ")
+		if !ok || slices.Contains(lines, "bare") {
+			continue
+		}
+		if wt, err := Open(dir); err == nil {
+			wts = append(wts, wt)
+		}
+	}
+	return wts, nil
 }
 
 // Slug returns "owner/name" of the origin remote, or "" if there is none.
