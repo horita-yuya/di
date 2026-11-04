@@ -147,7 +147,7 @@ git 実行は tea.Cmd 内 (goroutine) で行い UI をブロックしない。
   閉じている時は Claude の作業中なら `[AI: <status>…]`、未読の返信があれば `● Claude replied` をタイトルに付ける (Worktrees の `●N` にも 1 として数える)。
 - タイトルのクリックで開閉。開くと diff ペインの下半分 (最低 textarea + 4 行) を使い、タイトル → 会話ログ (`you:` / `claude:`、折り返し、下詰め、
   ホイールでスクロール) → textarea (幅 = diff ペイン - 2) + `Send` ボタン。開くと textarea がここに移ってフォーカスする (書きかけは保持)。
-  コメント入力中は textarea の代わりに入力欄風の 1 行を出し、クリックでこちらに戻す。閉じると textarea も閉じる。
+  コメント入力中は textarea の代わりに入力欄風の 1 行を出し、セクション内 (タイトル以外) のどこをクリックしてもこちらに戻す。閉じると textarea も閉じる。
 - 送信で `chat` に追加して接続中の mcp に `message` を送る。textarea は開いたまま (続けて送れる)。未接続ならエラー表示で下書きは残す。
 - Claude は予約 ID `message` で `reply_comment` / `set_status` する。Restore でも ID `message` のスレッドとして返ってくれば (chat が空なら) 会話を戻す。
 

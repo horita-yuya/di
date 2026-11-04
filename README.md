@@ -52,7 +52,7 @@ Mouse driven (the keyboard only does `↑` / `↓` and `ctrl+c` to quit).
 | `Commit & Push` in the footer | Commit all changes and push, with the message typed in a dialog (`Commit` / `Cancel`) |
 | `Open PR` in the footer | Open the branch's pull request (or the create page) in the browser |
 | `Restore` in AI Replies (shown when it is empty) | Ask Claude to restore the unresolved threads after di restarted (the note after it shows the request, then how many threads came back) |
-| `Message AI` bar (bottom of the diff pane) | Open / close a conversation with Claude that is not about any file or line: it takes the lower half of the diff pane, and Claude answers there (`Send` or `enter`). Closed, the bar shows Claude's progress and `● Claude replied` |
+| `Message AI` bar (bottom of the diff pane) | Open / close a conversation with Claude that is not about any file or line: it takes the lower half of the diff pane, and Claude answers there (`Send` or `enter`; a click anywhere in it brings the input back, e.g. after commenting on a line). Closed, the bar shows Claude's progress and `● Claude replied` |
 | Drag | Select text within a pane and copy it to the clipboard (OSC 52; from inside code text it leaves out the line numbers). A press and release without moving is a click |
 | Click a URL | Open it in the browser (a URL wrapped in a thread opens in full) |
 

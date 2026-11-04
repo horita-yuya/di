@@ -298,20 +298,20 @@ func TestWorktrees(t *testing.T) {
 func TestMessageAI(t *testing.T) {
 	m, sent := newModel(t)
 	diffX, h := m.width*3/10+1, m.bodyHeight()
-	row := func(m model, y int) string {
+	at := func(m model, y int) string {
 		return ansi.Cut(ansi.Strip(strings.Split(m.View().Content, "\n")[y]), diffX, m.width)
 	}
 	// By default the diff takes the right pane but for the section's title at its bottom.
-	if m.diffHeight() != h-1 || !strings.HasPrefix(row(m, h-1), "▶ Message AI") {
-		t.Fatalf("diffHeight=%d title %q", m.diffHeight(), row(m, h-1))
+	if m.diffHeight() != h-1 || !strings.HasPrefix(at(m, h-1), "▶ Message AI") {
+		t.Fatalf("diffHeight=%d title %q", m.diffHeight(), at(m, h-1))
 	}
 	// Clicking the title opens it with the input focused, and the diff shrinks.
 	m = click(m, diffX+2, h-1)
 	if !m.chatOpen || !m.direct || !m.editing || m.diffHeight() > (h+1)/2 || slices.Contains(m.screen(), -1) {
 		t.Fatalf("open=%v direct=%v diffHeight=%d", m.chatOpen, m.direct, m.diffHeight())
 	}
-	if !strings.HasPrefix(row(m, m.diffHeight()), "▼ Message AI") || !strings.HasPrefix(row(m, h-1), "   Send ") {
-		t.Fatalf("title %q, last %q", row(m, m.diffHeight()), row(m, h-1))
+	if !strings.HasPrefix(at(m, m.diffHeight()), "▼ Message AI") || !strings.HasPrefix(at(m, h-1), "   Send ") {
+		t.Fatalf("title %q, last %q", at(m, m.diffHeight()), at(m, h-1))
 	}
 	if w := lipgloss.Width(m.input.View()); w != m.diffWidth()-2 {
 		t.Fatalf("input width %d", w)
@@ -326,8 +326,8 @@ func TestMessageAI(t *testing.T) {
 	}
 	// Claude's progress and reply show in the section, not in AI Replies.
 	m = update(m, peerData{m.worktree, thread.ToTUI{Status: &thread.Status{ID: chatID, Text: "thinking"}}})
-	if !strings.Contains(row(m, m.diffHeight()), "[AI: thinking…]") {
-		t.Fatalf("title %q", row(m, m.diffHeight()))
+	if !strings.Contains(at(m, m.diffHeight()), "[AI: thinking…]") {
+		t.Fatalf("title %q", at(m, m.diffHeight()))
 	}
 	m = update(m, peerData{m.worktree, thread.ToTUI{Reply: &thread.Reply{ID: chatID, Body: "fine"}}})
 	if v := ansi.Strip(m.View().Content); !strings.Contains(v, "you: how is it going?") || !strings.Contains(v, "claude: fine") || len(m.replies()) != 0 || m.chatUnread {
@@ -339,12 +339,20 @@ func TestMessageAI(t *testing.T) {
 		t.Fatalf("open=%v editing=%v", m.chatOpen, m.editing)
 	}
 	m = update(m, peerData{m.worktree, thread.ToTUI{Reply: &thread.Reply{ID: chatID, Body: "more"}}})
-	if !strings.Contains(row(m, h-1), "● Claude replied") {
-		t.Fatalf("title %q", row(m, h-1))
+	if !strings.Contains(at(m, h-1), "● Claude replied") {
+		t.Fatalf("title %q", at(m, h-1))
+	}
+	// While the textarea is on a comment, a click anywhere in the open section brings it back.
+	m = click(m, diffX+2, h-1)
+	m = click(m, diffX+codeX+2, lineY(t, m, func(r row) bool { return r.kind == rowLine && r.text == "TWO" }))
+	if m.direct || !m.editing {
+		t.Fatal("comment did not take the textarea")
+	}
+	if m = click(m, diffX+20, m.diffHeight()+2); !m.direct || !m.input.Focused() {
+		t.Fatal("click in the conversation did not bring the input back")
 	}
 	// Without Claude the draft stays.
 	m.peers = nil
-	m = click(m, diffX+2, h-1)
 	m.input.SetValue("hello")
 	m = update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
 	if m.pushErr == nil || m.input.Value() != "hello" || len(m.chat) != 3 || m.chatUnread {

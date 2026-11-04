@@ -588,8 +588,8 @@ func (m *model) click(x, y int) tea.Cmd {
 	return nil
 }
 
-// clickChat handles a click at (x, y) in the Message AI section: its title opens or closes it; below it are
-// the input row, or the open input with " Send " at x 2-7 on the line under it.
+// clickChat handles a click at (x, y) in the Message AI section: its title opens or closes it, " Send " at x 2-7
+// on its last line sends, and anywhere else brings the input there.
 func (m *model) clickChat(x, y int) tea.Cmd {
 	switch last := y == m.chatHeight()-1; {
 	case y == 0:
@@ -603,10 +603,10 @@ func (m *model) clickChat(x, y int) tea.Cmd {
 			m.input.Reset()
 		}
 		m.scroll()
-	case last && !m.direct:
-		return m.focusChat()
-	case last && x >= 2 && x < 8:
+	case m.direct && last && x >= 2 && x < 8:
 		return m.submit()
+	case !m.direct:
+		return m.focusChat()
 	}
 	return nil
 }
