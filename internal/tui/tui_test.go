@@ -76,8 +76,20 @@ func TestCommentReplyResolveRestore(t *testing.T) {
 	if scr := m.screen(); scr[y+1] != -1 {
 		t.Fatalf("box not below the line: %v", scr)
 	}
+	// The box starts where the code text does, after the gutter and line numbers.
+	if w := lipgloss.Width(m.input.View()); w != m.diffWidth()-codeX {
+		t.Fatalf("input width %d, want %d", w, m.diffWidth()-codeX)
+	}
+	lines := strings.Split(ansi.Strip(m.View().Content), "\n")
+	if box := ansi.Cut(lines[y+1], diffX, m.width); !strings.HasPrefix(box, strings.Repeat(" ", codeX)) || strings.TrimSpace(box) == "" {
+		t.Fatalf("box not indented to the code text: %q", box)
+	}
 	m.input.SetValue("why?")
-	m = click(m, diffX+2, y+1+lipgloss.Height(m.input.View())) // " Comment " on the box's button line
+	by := y + 1 + lipgloss.Height(m.input.View()) // the box's button line
+	if m = click(m, diffX+2, by); !m.editing {
+		t.Fatal("click left of the indented box sent the comment")
+	}
+	m = click(m, diffX+codeX+2, by) // " Comment "
 	if m.editing || len(m.threads) != 1 {
 		t.Fatalf("comment not sent: editing=%v threads=%v", m.editing, m.threads)
 	}
@@ -132,19 +144,20 @@ func TestCommentReplyResolveRestore(t *testing.T) {
 
 func TestRestoreButton(t *testing.T) {
 	m, sent := newModel(t)
-	footer := m.View().Content[strings.LastIndex(m.View().Content, "\n")+1:]
-	plain := ansi.Strip(footer)
-	i := strings.Index(plain, " Restore ")
-	if i < 0 {
-		t.Fatal("no Restore button")
+	// With no replies, the panel under the tree holds the Restore button; the footer no longer does.
+	lines := strings.Split(ansi.Strip(m.View().Content), "\n")
+	if m.treeHeight() != m.bodyHeight()-2 || !strings.HasPrefix(lines[m.treeHeight()+1], " Restore ") {
+		t.Fatalf("treeHeight=%d panel row %q", m.treeHeight(), lines[m.treeHeight()+1])
 	}
-	x := ansi.StringWidth(plain[:i])
-	m = click(m, x+1, m.height-1)
+	if strings.Contains(lines[len(lines)-1], "Restore") {
+		t.Fatalf("footer still has Restore: %q", lines[len(lines)-1])
+	}
+	m = click(m, 2, m.treeHeight()+1)
 	if got := <-sent; !got.Restore {
 		t.Fatalf("broadcast %+v", got)
 	}
 	m.peers = nil
-	m = click(m, x+1, m.height-1)
+	m = click(m, 2, m.treeHeight()+1)
 	if m.pushErr == nil {
 		t.Fatal("want an error without Claude")
 	}

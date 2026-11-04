@@ -62,7 +62,7 @@ repos:
 ## internal/thread
 
 コメントはスレッド (ユーザー ⇄ Claude の往復)。**永続化しない。TUI プロセスのメモリ上にのみ持つ** (di を閉じたら消える)。
-di 再起動後は footer の `Restore` で、会話を覚えている Claude に `restore_comments` で送り返してもらう。
+di 再起動後は空の Claude replies パネルの `Restore` で、会話を覚えている Claude に `restore_comments` で送り返してもらう。
 
 ```go
 type Message struct {
@@ -94,7 +94,7 @@ type Thread struct {
 - プロトコル: 双方向 newline-delimited JSON (`json.Encoder`/`json.Decoder`)。各行は envelope
   - TUI → mcp: `ToMCP{thread?, resolved?, restore?}` を接続中の全 mcp へ broadcast
     - `thread`: ユーザーが新規コメント / 返信した時のスレッド全体。mcp が接続した時は「最後が user」のスレッドを全部送る。
-    - `resolved`: Resolve したスレッド ID。`restore`: footer の `Restore` (Claude に復元を依頼)。
+    - `resolved`: Resolve したスレッド ID。`restore`: Claude replies パネルの `Restore` (Claude に復元を依頼)。
   - mcp → TUI: `ToTUI{reply?, restore?}`。`reply` は `{"id", "body"}` (Claude の返信) でメッセージ追加。
     `restore` はスレッド配列で、ID が未登録 (冪等) かつメッセージのあるものを追加し、seq を各 ID 以上に上げる。
 - `di mcp` は TUI 未起動なら 1 秒間隔で再接続を試み続ける (Claude を先に起動しても良い)。
@@ -117,8 +117,9 @@ git 実行は tea.Cmd 内 (goroutine) で行い UI をブロックしない。
 - ファイル行にも `▾/▸` を表示し、クリックで fold 状態をトグル (行の他の部分はジャンプ)。
 - diff 側カーソルのファイルをツリーでハイライト (同期)。
 - Claude の返信に未回答のスレッドがあるファイル (と、それを含む閉じたディレクトリ) をスレッドと同じ黄色でハイライト。
-- ツリー下部に Claude replies パネル (最大で左ペインの半分): 最後の発言が Claude のスレッドを `Resolve` ボタン + `file L/R行` + 返信の 1 行目で列挙。
+- ツリー下部に Claude replies パネルを常に表示 (最大で左ペインの半分): 最後の発言が Claude のスレッドを `Resolve` ボタン + `file L/R行` + 返信の 1 行目で列挙。
   `Resolve` でスレッドを削除 (メモリ上のみ、diff からも消える) して mcp に `resolved` を送る、他の部分のクリックでそのスレッドへジャンプ。
+  返信が無い時はタイトル行の下に `Restore` ボタンを置き、接続中の mcp に `restore` を送る (未接続ならエラー表示)。
 
 ### Diff
 - 平坦な row 配列 (file header / hunk header / code line / comment) を自前でスクロール描画する (viewport 不要)。
@@ -127,13 +128,13 @@ git 実行は tea.Cmd 内 (goroutine) で行い UI をブロックしない。
 - config で collapsed なファイルはデフォルトで `▶`。ユーザーは開ける。
 - 操作はマウスのみ (キーは `ctrl+c` 終了だけ)。ホイールでポインタ下のペインをスクロール、ファイルヘッダのクリックで開閉、
   コード行のクリックでコメント入力 (ホバー行の gutter に `+` を表示、入力中のクリックは書きかけのまま対象を切替)。
-  bubbles/textarea + `Comment` / `Cancel` ボタンの box は diff ペイン内の対象行 (返信ならスレッドの `Comment` 行) の直下に inline で描画する。
+  bubbles/textarea + `Comment` / `Cancel` ボタンの box は diff ペイン内の対象行 (返信ならスレッドの `Comment` 行) の直下に inline で描画し、コード本文の開始位置 (gutter 2 + 行番号 10 = 12 桁目) に揃える。
   `screen()` が diff ペインの各行 → row index (box の行は -1) を返し、描画とマウス判定の両方で使う。開いた時だけ box が見えるようにスクロールする。
 - スレッドは対象行の直下に表示: `💬 [status]` + メッセージを `you: ...` / `claude: ...` で時系列表示。
 - スレッド末尾の `Comment` ボタンでスレッドにコメントを追加 (送信で Claude に push)。
   対象 (Side, Line) の行内容が LineText と一致しなければ outdated 扱いで file header 直下に表示。
-- footer: `<status> <branch> ← [bases]  Commit & Push  Open PR  Restore  N files  +A -D`。
-  Commit & Push のメッセージ入力は従来通り画面下部の box。`Restore` は接続中の mcp に `restore` を送る (未接続ならエラー表示)。
+- footer: `<status> <branch> ← [bases]  Commit & Push  Open PR  N files  +A -D`。
+  Commit & Push のメッセージ入力は従来通り画面下部の box。
 
 ## MCP (`di mcp`)
 

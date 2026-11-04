@@ -44,6 +44,9 @@ var (
 	sides = map[string]string{"old": "L", "new": "R"} // GitHub's left/right line notation
 )
 
+// codeX is where a code line's text starts in the diff pane: the 2-cell gutter, then "%4s %4s " line numbers.
+const codeX = 12
+
 type rowKind int
 
 const (
@@ -203,7 +206,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		m.input.SetWidth(map[bool]int{false: m.diffWidth(), true: m.width}[m.commit])
+		m.input.SetWidth(map[bool]int{false: m.diffWidth() - codeX, true: m.width}[m.commit])
 		m.build() // rewraps threads
 	case loadedMsg:
 		if msg.gen != m.gen {
@@ -295,10 +298,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		treeW, h, scr := m.width*3/10, m.bodyHeight(), m.screen()
 		inTree := mouse.X < treeW
 		// The input's buttons, " Comment " at x 0-8 and " Cancel " at x 11-18: under the body in commit mode,
-		// on the inline box's last line in comment mode.
+		// on the inline box's last line (indented to the code text) in comment mode.
 		bx, by := 0, h+lipgloss.Height(m.input.View())
 		if !m.commit {
-			bx, by = treeW+1, slices.Index(scr, -1)+lipgloss.Height(m.input.View())
+			bx, by = treeW+1+codeX, slices.Index(scr, -1)+lipgloss.Height(m.input.View())
 		}
 		switch {
 		case mouse.Button == tea.MouseWheelUp || mouse.Button == tea.MouseWheelDown:
@@ -340,14 +343,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if mouse.X >= x && mouse.X < x+lipgloss.Width(" Open PR ") {
 				return m, func() tea.Msg { return prMsg{m.repo.OpenPR()} }
 			}
-			x += lipgloss.Width(" Open PR ") + 2
-			if mouse.X >= x && mouse.X < x+lipgloss.Width(" Restore ") {
-				if len(m.peers) == 0 {
-					m.pushErr = errors.New("Claude not connected")
-				} else {
-					m.broadcast(thread.ToMCP{Restore: true})
-				}
-			}
 		case m.editing && mouse.Y == by && (m.commit || slices.Contains(scr, -1)):
 			switch x := mouse.X - bx; {
 			case x >= 0 && x < 9:
@@ -374,8 +369,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		case inTree:
-			// Claude replies panel: a title row, then 2 rows per thread with " Resolve " at x 0-8 on the first.
+			// Claude replies panel: a title row, then 2 rows per thread with " Resolve " at x 0-8 on the first,
+			// or " Restore " at x 0-8 when there are none.
 			y, rs := mouse.Y-m.treeHeight()-1, m.replies()
+			if len(rs) == 0 && y == 0 && mouse.X < 9 {
+				if len(m.peers) == 0 {
+					m.pushErr = errors.New("Claude not connected")
+				} else {
+					m.broadcast(thread.ToMCP{Restore: true})
+				}
+			}
 			if y < 0 || y/2 >= len(rs) {
 				break
 			}
@@ -404,7 +407,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case rowComment, rowLine: // retargets an open textarea, keeping the draft
 				m.editing, m.commit, m.replyTo, m.target = true, false, r.thread, r
 				m.input.Placeholder = "Leave a comment (enter: send, alt+enter: newline)"
-				m.input.SetWidth(m.diffWidth())
+				m.input.SetWidth(m.diffWidth() - codeX)
 				// r is the anchor now: scroll the box below it into view.
 				if over := i - m.offset + 2 + lipgloss.Height(m.input.View()) - m.bodyHeight(); over > 0 {
 					m.offset += over
@@ -516,14 +519,14 @@ func (m *model) build() {
 			if text, ok := lines[k]; ok && text == t.LineText {
 				attached[k] = append(attached[k], t)
 			} else {
-				m.rows = append(m.rows, threadRows(f, t, fmt.Sprintf("(outdated %s:%d) ", t.Side, t.Line), m.diffWidth()-12)...)
+				m.rows = append(m.rows, threadRows(f, t, fmt.Sprintf("(outdated %s:%d) ", t.Side, t.Line), m.diffWidth()-codeX)...)
 			}
 		}
 		for _, r := range body {
 			m.rows = append(m.rows, r)
 			if r.kind == rowLine {
 				for _, t := range attached[r.key()] {
-					m.rows = append(m.rows, threadRows(f, t, "", m.diffWidth()-12)...)
+					m.rows = append(m.rows, threadRows(f, t, "", m.diffWidth()-codeX)...)
 				}
 			}
 		}
@@ -670,13 +673,11 @@ func (m model) replies() []thread.Thread {
 	})
 }
 
-// treeHeight is the tree's share of the left pane; the Claude replies panel takes the rest, up to half.
+// treeHeight is the tree's share of the left pane; the Claude replies panel takes the rest, up to half:
+// a title row, then 2 rows per reply or the Restore row when there are none.
 func (m model) treeHeight() int {
 	h := m.bodyHeight()
-	if n := len(m.replies()); n > 0 {
-		return h - min(1+2*n, h/2)
-	}
-	return h
+	return h - min(max(2, 1+2*len(m.replies())), h/2)
 }
 
 func (m model) diffWidth() int { return m.width - m.width*3/10 - 1 }
@@ -742,19 +743,19 @@ func (m model) View() tea.View {
 		}
 		tree = append(tree, st.Inline(true).Width(treeW).MaxWidth(treeW).Render(text))
 	}
-	if len(rs) > 0 {
-		title := fmt.Sprintf("─ Claude replies (%d) ", len(rs))
-		tree = append(tree, slices.Repeat([]string{""}, th-len(tree))...)
-		tree = append(tree, dimStyle.Inline(true).MaxWidth(treeW).Render(title+strings.Repeat("─", max(0, treeW-lipgloss.Width(title)))))
-		for _, t := range rs {
-			w := max(0, treeW-9)
-			msg, _, _ := strings.Cut(t.Messages[len(t.Messages)-1].Body, "\n")
-			tree = append(tree,
-				buttonStyle.Render(" Resolve ")+threadStyle.Inline(true).Width(w).MaxWidth(w).Render(fmt.Sprintf(" %s %s%d", t.File, sides[t.Side], t.Line)),
-				dimStyle.Inline(true).MaxWidth(treeW).Render("  "+msg))
-		}
-		tree = tree[:h] // entries past the panel are not shown
+	title, w := fmt.Sprintf("─ Claude replies (%d) ", len(rs)), max(0, treeW-9)
+	tree = append(tree, slices.Repeat([]string{""}, th-len(tree))...)
+	tree = append(tree, dimStyle.Inline(true).MaxWidth(treeW).Render(title+strings.Repeat("─", max(0, treeW-lipgloss.Width(title)))))
+	if len(rs) == 0 {
+		tree = append(tree, buttonStyle.Render(" Restore ")+dimStyle.Inline(true).MaxWidth(w).Render(" ask Claude to restore threads"))
 	}
+	for _, t := range rs {
+		msg, _, _ := strings.Cut(t.Messages[len(t.Messages)-1].Body, "\n")
+		tree = append(tree,
+			buttonStyle.Render(" Resolve ")+threadStyle.Inline(true).Width(w).MaxWidth(w).Render(fmt.Sprintf(" %s %s%d", t.File, sides[t.Side], t.Line)),
+			dimStyle.Inline(true).MaxWidth(treeW).Render("  "+msg))
+	}
+	tree = tree[:h] // entries past the panel are not shown
 
 	scr := m.screen()
 	first := slices.Index(scr, -1) // the inline box's first line
@@ -778,7 +779,7 @@ func (m model) View() tea.View {
 			case first < 0 || first+v.Cursor.Y >= h: // the box is scrolled out
 				v.Cursor = nil
 			default:
-				v.Cursor.X += treeW + 1
+				v.Cursor.X += treeW + 1 + codeX
 				v.Cursor.Y += first
 			}
 		}
@@ -790,7 +791,7 @@ func (m model) View() tea.View {
 	var diff []string
 	for y, i := range scr {
 		if i < 0 {
-			diff = append(diff, ansi.Truncate(box[y-first], diffW, ""))
+			diff = append(diff, ansi.Truncate(strings.Repeat(" ", codeX)+box[y-first], diffW, ""))
 			continue
 		}
 		r := m.rows[i]
@@ -856,7 +857,7 @@ func (m model) View() tea.View {
 		}
 		footer += " " + st.Render(" "+b+" ")
 	}
-	footer += "  " + buttonStyle.Render(map[bool]string{false: " Commit & Push ", true: " Pushing… "}[m.pushing]) + "  " + buttonStyle.Render(" Open PR ") + "  " + buttonStyle.Render(" Restore ")
+	footer += "  " + buttonStyle.Render(map[bool]string{false: " Commit & Push ", true: " Pushing… "}[m.pushing]) + "  " + buttonStyle.Render(" Open PR ")
 	footer += fmt.Sprintf("  %d files  +%d -%d", len(m.files), add, del)
 	if m.err != nil {
 		footer += "  │ " + errStyle.Render(m.err.Error())

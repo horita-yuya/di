@@ -159,8 +159,8 @@ func TestRepliesInClosedDirectory(t *testing.T) {
 
 	// Once the user answers, it is no longer waiting on them.
 	m.threads[0].Messages = append(m.threads[0].Messages, thread.Message{Author: "user", Body: "ok"})
-	if len(m.replies()) != 0 || strings.Contains(m.View().Content, "Claude replies") {
-		t.Fatal("answered thread still listed")
+	if v := ansi.Strip(m.View().Content); len(m.replies()) != 0 || !strings.Contains(v, "Claude replies (0)") || !strings.Contains(v, " Restore ") {
+		t.Fatal("answered thread still listed, or the empty panel lacks Restore")
 	}
 }
 
