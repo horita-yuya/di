@@ -245,8 +245,12 @@ func TestWorktrees(t *testing.T) {
 	m = update(m, tea.WindowSizeMsg{Width: 100, Height: 30})
 	lines := func(m model) []string { return strings.Split(ansi.Strip(m.View().Content), "\n") }
 	wh := m.wtHeight()
-	if l := lines(m); wh != 3 || !strings.HasPrefix(l[0], " Worktrees") || !strings.HasPrefix(l[1], "▌● main") || !strings.HasPrefix(l[2], " ○ feature") {
-		t.Fatalf("wtHeight=%d section:\n%s", wh, strings.Join(l[:3], "\n"))
+	if l := lines(m); wh != 4 || !strings.HasPrefix(l[0], " Worktrees") || !strings.HasPrefix(l[1], "▌● main") || !strings.HasPrefix(l[2], " ○ feature") ||
+		!strings.HasPrefix(l[3], " Files") {
+		t.Fatalf("wtHeight=%d section:\n%s", wh, strings.Join(l[:4], "\n"))
+	}
+	if m = click(m, 2, 3); m.branch != "main" { // the Files title
+		t.Fatal("clicking the Files title switched worktrees")
 	}
 
 	// A reply to the other worktree badges its row and leaves this one's thread 7 alone.

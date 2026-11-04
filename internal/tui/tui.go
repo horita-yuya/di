@@ -425,8 +425,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.scroll()
 			}
 		case mouse.Y >= h: // the commit message input
-		case inTree && mouse.Y < wh: // the Worktrees section: a title row, then a row per worktree
-			if mouse.Y > 0 && m.wts[mouse.Y-1] != m.worktree {
+		case inTree && mouse.Y < wh: // the Worktrees section: a title row, a row per worktree, then the Files title
+			if mouse.Y > 0 && mouse.Y < wh-1 && m.wts[mouse.Y-1] != m.worktree {
 				m.worktree = m.wts[mouse.Y-1]
 				m.gen++ // drops the old worktree's loads, ending its reload loop
 				m.editing, m.commit = false, false
@@ -757,13 +757,13 @@ func (w *worktree) replies() []thread.Thread {
 	})
 }
 
-// wtHeight is the Worktrees section's share of the top of the left pane, up to a third: a title row, then a row
-// per worktree. A single worktree has none.
+// wtHeight is the Worktrees section's share of the top of the left pane, up to a third: a title row, a row
+// per worktree, then the Files title that separates it from the tree. A single worktree has none.
 func (m model) wtHeight() int {
 	if len(m.wts) < 2 {
 		return 0
 	}
-	return min(1+len(m.wts), m.bodyHeight()/3)
+	return min(1+len(m.wts), m.bodyHeight()/3) + 1
 }
 
 // treeHeight is the tree's share of the left pane below the Worktrees section; the AI Replies panel takes the rest,
@@ -791,7 +791,7 @@ func (m model) View() tea.View {
 	if wh > 0 {
 		tree = append(tree, headerStyle.Inline(true).Width(treeW).MaxWidth(treeW).Render(" Worktrees"))
 	}
-	for _, w := range m.wts[:max(0, wh-1)] {
+	for _, w := range m.wts[:max(0, wh-2)] {
 		// The branch, Claude's unanswered replies there and whether Claude is connected to it.
 		name, mark, st, badge := printable(cmp.Or(w.branch, filepath.Base(w.repo.Root))), "○", dimStyle, ""
 		if len(w.peers) > 0 {
@@ -806,6 +806,9 @@ func (m model) View() tea.View {
 			continue
 		}
 		tree = append(tree, lipgloss.NewStyle().Inline(true).MaxWidth(treeW).Render(" "+st.Render(mark)+" "+name+threadStyle.Render(badge)))
+	}
+	if wh > 0 {
+		tree = append(tree, headerStyle.Inline(true).Width(treeW).MaxWidth(treeW).Render(" Files"))
 	}
 	for _, n := range m.tree[m.treeOffset:min(len(m.tree), m.treeOffset+th)] {
 		cur := !n.dir && n.path == m.current

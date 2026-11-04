@@ -123,7 +123,7 @@ git 実行は tea.Cmd 内 (goroutine) で行い UI をブロックしない。
 - goroutine からのメッセージ (mcp の接続/切断/受信, Commit & Push / Open PR の結果) は対象の worktree を持ち、表示中でなくてもその worktree に反映する (再構築は表示中の時だけ)。
 - 左ペイン最上部に Worktrees セクション (worktree が 2 つ以上の時だけ。1 つなら従来と同じ見た目)。AI Replies と同じグレーのタイトル行の下に
   worktree ごとに 接続マーク (mcp 接続中は緑 `●`、無ければ dim `○`) + branch (空なら root のディレクトリ名) + 未回答の Claude 返信数 `●N` を 1 行で表示。
-  表示中の worktree はツリーのカーソルと同じハイライト。高さは左ペインの 1/3 まで (はみ出しは非表示)、その下がツリーと AI Replies パネル。
+  表示中の worktree はツリーのカーソルと同じハイライト。高さは左ペインの 1/3 まで (はみ出しは非表示)。続けて同じグレーの ` Files` タイトル行でツリーと区切り、その下がツリーと AI Replies パネル。
 - 行のクリックでその worktree に切り替える: gen を上げ (旧 worktree の読み込みと tick chain を捨てる)、textarea を閉じ、再構築して読み込みを始める。
   footer (接続表示, branch, Commit & Push, Open PR) は表示中の worktree に対して動く。
 
