@@ -469,6 +469,11 @@ func TestWheelScrollsALine(t *testing.T) {
 	if m = update(m, tea.MouseWheelMsg{X: x, Y: 0, Button: tea.MouseWheelDown}); m.offset != 1 {
 		t.Fatalf("down: offset %d", m.offset)
 	}
+	// A lone event the other way right after is trackpad jitter.
+	if m = update(m, tea.MouseWheelMsg{X: x, Y: 0, Button: tea.MouseWheelUp}); m.offset != 1 {
+		t.Fatalf("jitter: offset %d", m.offset)
+	}
+	m.wheelAt = m.wheelAt.Add(-wheelTurn) // after a pause, it turns
 	if m = update(m, tea.MouseWheelMsg{X: x, Y: 0, Button: tea.MouseWheelUp}); m.offset != 0 {
 		t.Fatalf("up: offset %d", m.offset)
 	}
