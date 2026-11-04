@@ -985,6 +985,12 @@ func (m model) screen() []int {
 			s = append(s, slices.Repeat([]int{-1}, lipgloss.Height(m.input.View())+1)...)
 		}
 	}
+	// The header of the file the top line belongs to sticks there, over that line, while its file scrolls under it.
+	if len(s) > 0 && s[0] >= 0 && m.rows[s[0]].kind != rowFile {
+		if h := m.header(path(m.rows[s[0]].file)); h >= 0 {
+			s[0] = h
+		}
+	}
 	return s[:min(len(s), m.diffHeight())]
 }
 

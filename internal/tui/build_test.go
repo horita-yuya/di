@@ -202,3 +202,15 @@ func TestTopRowStays(t *testing.T) {
 		})
 	}
 }
+
+func TestStickyFileHeader(t *testing.T) {
+	m := modelOf(t, diff, config.RepoConfig{})
+	m.offset = 2 // inside a.go's hunk
+	if r := m.rows[m.screen()[0]]; r.kind != rowFile || path(r.file) != "a.go" {
+		t.Fatalf("top line is %+v, want a.go's header", r)
+	}
+	m.offset = 0
+	if s := m.screen(); s[0] != 0 || s[1] != 1 {
+		t.Fatalf("screen at the top = %v", s[:2])
+	}
+}
