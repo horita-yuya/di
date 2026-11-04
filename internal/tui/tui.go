@@ -185,11 +185,9 @@ type model struct {
 	commit  bool // the textarea holds a commit message instead of a comment
 	direct  bool // the textarea holds a message to Claude, in the Message AI section, instead of a comment
 
-	chatOpen   bool      // the Message AI section under the diff is open
-	chatScroll int       // chat lines scrolled up from its end
-	wheelDir   int       // direction of the last wheel step taken: 1 down, -1 up
-	wheelAt    time.Time // when it was taken
-	replyTo    string    // thread ID being commented on; "" for a new thread on target
+	chatOpen   bool   // the Message AI section under the diff is open
+	chatScroll int    // chat lines scrolled up from its end
+	replyTo    string // thread ID being commented on; "" for a new thread on target
 	target     row
 	input      textarea.Model
 
@@ -435,20 +433,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmd := m.click(mouse.X, mouse.Y)
 			return m, cmd
 		case tea.MouseWheelMsg:
-			m.sel = selection{} // the text under it moves
 			// A line per event: the terminal already sends several per wheel notch (Ghostty 3) and one per
 			// line of trackpad travel, so more would make trackpad scrolling jump.
-			d := 1
-			if mouse.Button == tea.MouseWheelUp {
+			var d int
+			switch mouse.Button {
+			case tea.MouseWheelUp:
 				d = -1
+			case tea.MouseWheelDown:
+				d = 1
+			default: // sideways, e.g. a trackpad drifting while scrolling up or down
+				return m, nil
 			}
-			// A trackpad moved slowly sends a lone event the other way now and then; a real turn
-			// comes after a pause, so a reversal right after a step is dropped.
-			now := time.Now()
-			if d != m.wheelDir && now.Sub(m.wheelAt) < wheelTurn {
-				break
-			}
-			m.wheelDir, m.wheelAt = d, now
+			m.sel = selection{} // the text under it moves
 			switch {
 			case mouse.X < m.width*3/10:
 				m.treeOffset += d
@@ -465,9 +461,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	return m, nil
 }
-
-// wheelTurn is how soon after a wheel step one the other way counts as trackpad jitter.
-const wheelTurn = 150 * time.Millisecond
 
 // click handles a left click at (x, y): opening the URL under it, or pressing what is there.
 func (m *model) click(x, y int) tea.Cmd {
