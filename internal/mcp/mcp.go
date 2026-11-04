@@ -187,8 +187,13 @@ func (r *relay) run(ctx context.Context, sock string, out mcp.Connection) {
 			case in.Restore:
 				content = "The user restarted di and asked to restore its review threads. Call restore_comments with every di review thread " +
 					"from this conversation that the user has not resolved and that is not already in list_comments (an empty list if there are none). " +
-					"Give each thread its original id, file, side, line, line_text, context and full message history (user and claude), in order."
+					"Give each thread its original id, file, side, line, line_text, context and full message history (user and claude), in order. " +
+					"Include the conversation from di's Message AI box, if any, as one thread with id \"message\" and its messages only."
 				meta = map[string]string{"kind": "restore"}
+			case in.Message != "":
+				content = "The user sent you this message from di's Message AI box, not about a particular file or line. " +
+					"Answer it with reply_comment using id \"message\" (the user reads it in di), and post progress with set_status using that id while you work.\n\n" + in.Message
+				meta = map[string]string{"kind": "message"}
 			}
 			r.mu.Unlock()
 			params, err := json.Marshal(map[string]any{"content": content, "meta": meta})

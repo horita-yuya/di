@@ -29,6 +29,7 @@ type ToMCP struct {
 	Thread   *Thread `json:"thread,omitempty"`   // the user added a message
 	Resolved string  `json:"resolved,omitempty"` // thread ID the user resolved
 	Restore  bool    `json:"restore,omitempty"`  // the user asked Claude to restore threads
+	Message  string  `json:"message,omitempty"`  // a Message AI message, not about any file or line; Claude replies with thread ID "message"
 }
 
 // ToTUI is sent mcp → TUI.
@@ -40,13 +41,13 @@ type ToTUI struct {
 
 // Reply is Claude's answer to a thread.
 type Reply struct {
-	ID   string `json:"id" jsonschema:"thread id"`
+	ID   string `json:"id" jsonschema:"thread id, or \"message\" for the Message AI conversation"`
 	Body string `json:"body" jsonschema:"reply shown to the user in di"`
 }
 
 // Status is Claude's progress note on a thread it is working on.
 type Status struct {
-	ID   string `json:"id" jsonschema:"thread id"`
+	ID   string `json:"id" jsonschema:"thread id, or \"message\" for the Message AI conversation"`
 	Text string `json:"text" jsonschema:"a few words on what you are doing now, e.g. \"reading tui.go\", \"editing\", \"running tests\""`
 }
 

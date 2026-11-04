@@ -49,9 +49,12 @@ Mouse driven (the keyboard only does `↑` / `↓` and `ctrl+c` to quit).
 | `Resolve` in AI Replies (under the tree) | Delete the thread and tell Claude; click the rest of the entry to jump to it |
 | `Comment` / `Cancel` under the input (opens right below the line, aligned with the code text) | Send / discard (`enter` also sends; newline with `alt+enter` or `ctrl+j`) |
 | Base button in the footer | Diff against that base |
-| `Commit & Push` in the footer | Commit all changes and push |
+| `Commit & Push` in the footer | Commit all changes and push, with the message typed in a dialog (`Commit` / `Cancel`) |
 | `Open PR` in the footer | Open the branch's pull request (or the create page) in the browser |
 | `Restore` in AI Replies (shown when it is empty) | Ask Claude to restore the unresolved threads after di restarted (the note after it shows the request, then how many threads came back) |
+| `Message AI` bar (bottom of the diff pane) | Open / close a conversation with Claude that is not about any file or line: it takes the lower half of the diff pane, and Claude answers there (`Send` or `enter`). Closed, the bar shows Claude's progress and `● Claude replied` |
+| Drag | Select text within a pane and copy it to the clipboard (OSC 52; from inside code text it leaves out the line numbers). A press and release without moving is a click |
+| Click a URL | Open it in the browser (a URL wrapped in a thread opens in full) |
 
 Thread comments wrap to the width of the diff pane. Files with an unanswered Claude reply (and closed folders containing them) are highlighted in the tree, and listed in the AI Replies panel below it (in memory only), which is always shown and holds the `Restore` button while empty.
 

@@ -56,8 +56,10 @@ func update(m model, msg tea.Msg) model {
 	return next.(model)
 }
 
+// click presses and releases the left button at (x, y).
 func click(m model, x, y int) model {
-	return update(m, tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+	m = update(m, tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+	return update(m, tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseLeft})
 }
 
 // lineY is the diff pane line showing the row for which ok holds.
@@ -277,11 +279,11 @@ func TestWorktrees(t *testing.T) {
 			t.Fatalf("click on row %d switched", y)
 		}
 	}
-	m.editing, m.commit = true, true
+	m.editing, m.direct = true, true
 	gen := m.gen
 	m = click(m, 2, 2)
-	if m.worktree != other || m.gen == gen || m.editing || m.commit || m.header("gen/b.pb.go") < 0 {
-		t.Fatalf("not switched: editing=%v commit=%v rows=%d", m.editing, m.commit, len(m.rows))
+	if m.worktree != other || m.gen == gen || m.editing || m.direct || m.header("gen/b.pb.go") < 0 {
+		t.Fatalf("not switched: editing=%v direct=%v rows=%d", m.editing, m.direct, len(m.rows))
 	}
 	if l := lines(m); !strings.HasPrefix(l[1], " ● main") || !strings.HasPrefix(l[2], "▌○ feature ●1") ||
 		!strings.Contains(l[len(l)-1], "○ Claude not connected  feature ←") {
@@ -290,5 +292,137 @@ func TestWorktrees(t *testing.T) {
 	// A load of the previous worktree, still in flight, is dropped.
 	if m = update(m, loadedMsg{raw: diff, files: parse(t, diff), gen: gen}); m.raw != twoDirs {
 		t.Fatal("stale load applied")
+	}
+}
+
+func TestMessageAI(t *testing.T) {
+	m, sent := newModel(t)
+	diffX, h := m.width*3/10+1, m.bodyHeight()
+	row := func(m model, y int) string {
+		return ansi.Cut(ansi.Strip(strings.Split(m.View().Content, "\n")[y]), diffX, m.width)
+	}
+	// By default the diff takes the right pane but for the section's title at its bottom.
+	if m.diffHeight() != h-1 || !strings.HasPrefix(row(m, h-1), "▶ Message AI") {
+		t.Fatalf("diffHeight=%d title %q", m.diffHeight(), row(m, h-1))
+	}
+	// Clicking the title opens it with the input focused, and the diff shrinks.
+	m = click(m, diffX+2, h-1)
+	if !m.chatOpen || !m.direct || !m.editing || m.diffHeight() > (h+1)/2 || slices.Contains(m.screen(), -1) {
+		t.Fatalf("open=%v direct=%v diffHeight=%d", m.chatOpen, m.direct, m.diffHeight())
+	}
+	if !strings.HasPrefix(row(m, m.diffHeight()), "▼ Message AI") || !strings.HasPrefix(row(m, h-1), "   Send ") {
+		t.Fatalf("title %q, last %q", row(m, m.diffHeight()), row(m, h-1))
+	}
+	if w := lipgloss.Width(m.input.View()); w != m.diffWidth()-2 {
+		t.Fatalf("input width %d", w)
+	}
+	m.input.SetValue("how is it going?")
+	m = click(m, diffX+3, h-1) // " Send "
+	if got := <-sent; got.Message != "how is it going?" || got.Thread != nil {
+		t.Fatalf("broadcast %+v", got)
+	}
+	if !m.direct || m.input.Value() != "" || len(m.threads) != 0 || len(m.chat) != 1 {
+		t.Fatalf("direct=%v value=%q threads=%v chat=%v", m.direct, m.input.Value(), m.threads, m.chat)
+	}
+	// Claude's progress and reply show in the section, not in AI Replies.
+	m = update(m, peerData{m.worktree, thread.ToTUI{Status: &thread.Status{ID: chatID, Text: "thinking"}}})
+	if !strings.Contains(row(m, m.diffHeight()), "[AI: thinking…]") {
+		t.Fatalf("title %q", row(m, m.diffHeight()))
+	}
+	m = update(m, peerData{m.worktree, thread.ToTUI{Reply: &thread.Reply{ID: chatID, Body: "fine"}}})
+	if v := ansi.Strip(m.View().Content); !strings.Contains(v, "you: how is it going?") || !strings.Contains(v, "claude: fine") || len(m.replies()) != 0 || m.chatUnread {
+		t.Fatalf("unread=%v replies=%v view:\n%s", m.chatUnread, m.replies(), v)
+	}
+	// Closed, a reply is flagged on the title.
+	m = click(m, diffX+2, m.diffHeight())
+	if m.chatOpen || m.editing || m.diffHeight() != h-1 {
+		t.Fatalf("open=%v editing=%v", m.chatOpen, m.editing)
+	}
+	m = update(m, peerData{m.worktree, thread.ToTUI{Reply: &thread.Reply{ID: chatID, Body: "more"}}})
+	if !strings.Contains(row(m, h-1), "● Claude replied") {
+		t.Fatalf("title %q", row(m, h-1))
+	}
+	// Without Claude the draft stays.
+	m.peers = nil
+	m = click(m, diffX+2, h-1)
+	m.input.SetValue("hello")
+	m = update(m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if m.pushErr == nil || m.input.Value() != "hello" || len(m.chat) != 3 || m.chatUnread {
+		t.Fatalf("pushErr=%v value=%q chat=%v", m.pushErr, m.input.Value(), m.chat)
+	}
+	// The conversation comes back with Restore.
+	m.chat = nil
+	m = update(m, peerData{m.worktree, thread.ToTUI{Restore: []thread.Thread{{ID: chatID, Messages: []thread.Message{{Author: "user", Body: "hi"}}}}}})
+	if len(m.chat) != 1 || len(m.threads) != 0 {
+		t.Fatalf("chat=%v threads=%v", m.chat, m.threads)
+	}
+}
+
+func TestCommitDialog(t *testing.T) {
+	m, _ := newModel(t)
+	footer := strings.Split(ansi.Strip(m.View().Content), "\n")[m.height-1]
+	m = click(m, lipgloss.Width(footer[:strings.Index(footer, "Commit & Push")]), m.height-1)
+	if !m.commit || m.bodyHeight() != m.height-1 {
+		t.Fatalf("commit=%v bodyHeight=%d", m.commit, m.bodyHeight())
+	}
+	// The dialog sits on top of the body, centered.
+	dx, dy, box := m.dialog()
+	lines := strings.Split(ansi.Strip(m.View().Content), "\n")
+	if len(lines) != m.height || !strings.Contains(lines[dy+1], "Commit & Push") || !strings.Contains(lines[dy+len(box)-2], " Commit    Cancel ") {
+		t.Fatalf("dialog not drawn:\n%s", strings.Join(lines, "\n"))
+	}
+	if dx <= 0 || dx+lipgloss.Width(box[0]) >= m.width {
+		t.Fatalf("dialog at x %d, width %d", dx, lipgloss.Width(box[0]))
+	}
+	// It is modal: clicks elsewhere do nothing, Cancel closes it.
+	diffX := m.width*3/10 + 1
+	m = click(m, diffX+codeX+2, lineY(t, m, func(r row) bool { return r.kind == rowLine && r.text == "TWO" }))
+	if !m.commit || len(m.threads) != 0 {
+		t.Fatal("click went through the dialog")
+	}
+	if m = click(m, dx+2+12, dy+len(box)-2); m.commit || m.editing {
+		t.Fatalf("not cancelled: commit=%v", m.commit)
+	}
+}
+
+func TestSelectCopies(t *testing.T) {
+	m, _ := newModel(t)
+	diffX := m.width*3/10 + 1
+	y := lineY(t, m, func(r row) bool { return r.kind == rowLine && r.text == "TWO" })
+	// Dragging over code text selects it without the line numbers and does not open a comment.
+	m = update(m, tea.MouseClickMsg{X: diffX + codeX + 1, Y: y - 1, Button: tea.MouseLeft})
+	m = update(m, tea.MouseMotionMsg{X: diffX + codeX + 3, Y: y, Button: tea.MouseLeft})
+	next, cmd := m.Update(tea.MouseReleaseMsg{X: diffX + codeX + 3, Y: y, Button: tea.MouseLeft})
+	m = next.(model)
+	if m.editing || cmd == nil {
+		t.Fatalf("editing=%v cmd=%v", m.editing, cmd)
+	}
+	if got := m.selectedText(); got != "two\nTWO" {
+		t.Fatalf("selected %q", got)
+	}
+	if v := m.View().Content; !strings.Contains(v, selStyle.Render("TWO")) {
+		t.Fatalf("selection not highlighted:\n%s", v)
+	}
+	// The next click clears it.
+	if m = click(m, diffX+codeX+2, 0); m.selSpans() != nil {
+		t.Fatal("selection kept")
+	}
+}
+
+func TestURLAt(t *testing.T) {
+	m, _ := newModel(t)
+	url := "https://example.com/" + strings.Repeat("a", 120)
+	m.threads = []thread.Thread{{ID: "1", File: "a.go", Side: "new", Line: 2, LineText: "TWO",
+		Messages: []thread.Message{{Author: "user", Body: "see"}, {Author: "claude", Body: "look at " + url + "."}}}}
+	m.build()
+	diffX := m.width*3/10 + 1
+	y := lineY(t, m, func(r row) bool { return r.kind == rowThread && strings.Contains(r.text, "https://") })
+	x := diffX + strings.Index(ansi.Strip(strings.Split(m.View().Content, "\n")[y])[diffX:], "https://") + 2
+	// The URL wraps on screen; clicking its start gives the whole of it.
+	if got := m.urlAt(x, y); got != url {
+		t.Fatalf("urlAt = %q", got)
+	}
+	if got := m.urlAt(diffX+2, y); got != "" {
+		t.Fatalf("urlAt off the URL = %q", got)
 	}
 }

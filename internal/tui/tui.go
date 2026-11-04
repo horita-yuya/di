@@ -9,7 +9,10 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -41,9 +44,16 @@ var (
 	cursorBg     = lipgloss.Color("#b6e3ff")
 	buttonStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ffffff")).Background(lipgloss.Color("#1f883d"))
 	cancelStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#1f2328")).Background(lipgloss.Color("#eaeef2"))
+	selStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#ffffff")).Background(lipgloss.Color("#0969da"))
+
+	// urlRe finds URLs in screen text, which has no spaces or quotes in them and ends at the pane border.
+	urlRe = regexp.MustCompile("https?://[^\\s<>\"'`│]+")
 
 	sides = map[string]string{"old": "L", "new": "R"} // GitHub's left/right line notation
 )
+
+// chatID is the thread ID Claude replies to messages from the Message AI section with.
+const chatID = "message"
 
 // codeX is where a code line's text starts in the diff pane: the 2-cell gutter, then "%4s %4s " line numbers.
 const codeX = 12
@@ -123,6 +133,11 @@ type (
 		wt  *worktree
 		err error
 	}
+	// openedMsg is the result of opening a clicked URL.
+	openedMsg struct {
+		wt  *worktree
+		err error
+	}
 )
 
 // worktree is the state of one worktree of the repo. di shows one at a time and serves the threads of all.
@@ -137,6 +152,8 @@ type worktree struct {
 	seq         int               // last thread ID; IDs stay unique after a thread is resolved
 	status      map[string]string // thread ID → Claude's latest set_status, until it replies
 	restoreNote string            // feedback after the Restore button, e.g. " restored 2"
+	chat        []thread.Message  // the Message AI conversation, not about a particular file or line
+	chatUnread  bool              // Claude replied in chat while it was not shown
 	peers       []net.Conn
 
 	collapsed map[string]bool // file path → folded
@@ -164,12 +181,24 @@ type model struct {
 	mouseX, mouseY int
 
 	editing bool
-	commit  bool   // the textarea holds a commit message instead of a comment
-	replyTo string // thread ID being commented on; "" for a new thread on target
-	target  row
-	input   textarea.Model
+	commit  bool // the textarea holds a commit message instead of a comment
+	direct  bool // the textarea holds a message to Claude, in the Message AI section, instead of a comment
+
+	chatOpen   bool   // the Message AI section under the diff is open
+	chatScroll int    // chat lines scrolled up from its end
+	replyTo    string // thread ID being commented on; "" for a new thread on target
+	target     row
+	input      textarea.Model
+
+	sel selection
 
 	width, height int
+}
+
+// selection is the text being selected by dragging with the left button.
+type selection struct {
+	pressed, dragged bool // the button is down; it moved since the press
+	x0, y0, x1, y1   int  // where it was pressed and where it is now
 }
 
 // Run serves each worktree of repo's repository that no other di serves, on its own socket, and shows repo first.
@@ -261,7 +290,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		m.input.SetWidth(map[bool]int{false: m.diffWidth() - codeX, true: m.width}[m.commit])
+		m.input.SetWidth(m.inputWidth())
 		m.build() // rewraps threads
 	case loadedMsg:
 		if msg.gen != m.gen {
@@ -299,20 +328,35 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case prMsg:
 		msg.wt.pushErr = msg.err
+	case openedMsg:
+		if msg.err != nil {
+			msg.wt.pushErr = msg.err
+		}
 	case peerData:
 		wt := msg.wt
-		if r := msg.Reply; r != nil {
+		if r := msg.Reply; r != nil && r.ID == chatID {
+			wt.chat = append(wt.chat, thread.Message{Author: "claude", Body: r.Body})
+			delete(wt.status, chatID)
+			wt.chatUnread = wt.chatUnread || wt != m.worktree || !m.chatOpen
+		} else if r != nil {
 			if i := slices.IndexFunc(wt.threads, func(t thread.Thread) bool { return t.ID == r.ID }); i >= 0 {
 				wt.threads[i].Messages = append(wt.threads[i].Messages, thread.Message{Author: "claude", Body: r.Body})
 			}
 			delete(wt.status, r.ID)
 		}
-		if s := msg.Status; s != nil && slices.ContainsFunc(wt.threads, func(t thread.Thread) bool { return t.ID == s.ID }) {
+		if s := msg.Status; s != nil && (s.ID == chatID || slices.ContainsFunc(wt.threads, func(t thread.Thread) bool { return t.ID == s.ID })) {
 			wt.status[s.ID] = s.Text
 		}
 		if msg.Restore != nil {
 			added := 0
 			for _, t := range msg.Restore {
+				if t.ID == chatID {
+					if len(wt.chat) == 0 && len(t.Messages) > 0 {
+						wt.chat = t.Messages
+						added++
+					}
+					continue
+				}
 				n, _ := strconv.Atoi(t.ID)
 				wt.seq = max(wt.seq, n)
 				if len(t.Messages) > 0 && !slices.ContainsFunc(wt.threads, func(u thread.Thread) bool { return u.ID == t.ID }) {
@@ -363,148 +407,237 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case tea.MouseMsg:
-		_, click := msg.(tea.MouseClickMsg)
 		mouse := msg.Mouse()
 		m.mouseX, m.mouseY = mouse.X, mouse.Y
-		treeW, h, wh, scr := m.width*3/10, m.bodyHeight(), m.wtHeight(), m.screen()
-		inTree := mouse.X < treeW
-		// The input's buttons, " Comment " at x 0-8 and " Cancel " at x 11-18: under the body in commit mode,
-		// on the inline box's last line (indented to the code text) in comment mode.
-		bx, by := 0, h+lipgloss.Height(m.input.View())
-		if !m.commit {
-			bx, by = treeW+1+codeX, slices.Index(scr, -1)+lipgloss.Height(m.input.View())
-		}
-		switch {
-		case mouse.Button == tea.MouseWheelUp || mouse.Button == tea.MouseWheelDown:
+		// A left press starts a selection; releasing it where it was pressed is a click, after a drag it copies the selection.
+		switch msg.(type) {
+		case tea.MouseClickMsg:
+			if mouse.Button == tea.MouseLeft {
+				m.sel = selection{pressed: true, x0: mouse.X, y0: mouse.Y, x1: mouse.X, y1: mouse.Y}
+			}
+		case tea.MouseMotionMsg:
+			if m.sel.pressed && mouse.Button == tea.MouseLeft {
+				m.sel.x1, m.sel.y1 = mouse.X, mouse.Y
+				m.sel.dragged = m.sel.dragged || m.sel.x1 != m.sel.x0 || m.sel.y1 != m.sel.y0
+			}
+		case tea.MouseReleaseMsg:
+			if !m.sel.pressed {
+				break
+			}
+			m.sel.pressed = false
+			if m.sel.dragged { // stays highlighted until the next press
+				return m, tea.SetClipboard(m.selectedText())
+			}
+			m.sel = selection{}
+			cmd := m.click(mouse.X, mouse.Y)
+			return m, cmd
+		case tea.MouseWheelMsg:
+			m.sel = selection{} // the text under it moves
 			d := 3
 			if mouse.Button == tea.MouseWheelUp {
 				d = -3
 			}
-			if inTree {
+			switch {
+			case mouse.X < m.width*3/10:
 				m.treeOffset += d
-			} else {
+			case mouse.Y >= m.diffHeight():
+				m.chatScroll -= d
+			default:
 				m.offset += d
 			}
 			m.scroll()
-			if !inTree && m.offset < len(m.rows) {
+			if mouse.X >= m.width*3/10 && mouse.Y < m.diffHeight() && m.offset < len(m.rows) {
 				m.current = path(m.rows[m.offset].file)
-			}
-		case !click || mouse.Button != tea.MouseLeft:
-		case mouse.Y == m.height-1:
-			// Base buttons in the footer, laid out as in View.
-			x := lipgloss.Width(m.connection() + m.branch + " ← ")
-			for _, b := range m.bases {
-				w := lipgloss.Width(" " + b + " ")
-				if mouse.X >= x && mouse.X < x+w && b != m.base {
-					m.base = b
-					m.gen++
-					return m, m.load
-				}
-				x += w + 1
-			}
-			x++ // two spaces before the commit button
-			if !m.pushing && mouse.X >= x && mouse.X < x+lipgloss.Width(" Commit & Push ") {
-				m.editing, m.commit = true, true
-				m.input.Placeholder = "Commit message (enter: commit & push, empty: timestamp)"
-				m.input.SetWidth(m.width)
-				m.scroll()
-				return m, m.input.Focus()
-			}
-			x += lipgloss.Width(map[bool]string{false: " Commit & Push ", true: " Pushing… "}[m.pushing]) + 2
-			if mouse.X >= x && mouse.X < x+lipgloss.Width(" Open PR ") {
-				return m, func() tea.Msg { return prMsg{m.worktree, m.repo.OpenPR()} }
-			}
-		case m.editing && mouse.Y == by && (m.commit || slices.Contains(scr, -1)):
-			switch x := mouse.X - bx; {
-			case x >= 0 && x < 9:
-				cmd := m.submit()
-				return m, cmd
-			case x >= 11 && x < 19:
-				m.editing, m.commit = false, false
-				m.input.Reset()
-				m.scroll()
-			}
-		case mouse.Y >= h: // the commit message input
-		case inTree && mouse.Y < wh: // the Worktrees section: a title row, a row per worktree, then the Files title
-			if mouse.Y > 0 && mouse.Y < wh-1 && m.wts[mouse.Y-1] != m.worktree {
-				m.worktree = m.wts[mouse.Y-1]
-				m.gen++ // drops the old worktree's loads, ending its reload loop
-				m.editing, m.commit = false, false
-				m.input.Reset()
-				m.build()
-				return m, m.load
-			}
-		case inTree && mouse.Y < wh+m.treeHeight():
-			if i := m.treeOffset + mouse.Y - wh; i < len(m.tree) {
-				n := m.tree[i]
-				switch {
-				case n.dir:
-					m.open[n.path] = !m.open[n.path]
-					m.build()
-				case mouse.X < 3+2*n.depth: // on the file arrow (after the 1-cell cursor and the indent)
-					m.collapsed[n.path] = !m.collapsed[n.path]
-					m.build()
-				default:
-					m.jump(n.path)
-				}
-			}
-		case inTree:
-			// AI Replies panel: a title row, then 2 rows per thread with " Resolve " at x 0-8 on the first,
-			// or " Restore " at x 0-8 when there are none.
-			y, rs := mouse.Y-wh-m.treeHeight()-1, m.replies()
-			if len(rs) == 0 && y == 0 && mouse.X < 9 {
-				if len(m.peers) == 0 {
-					m.pushErr = errors.New("Claude not connected")
-				} else {
-					m.broadcast(thread.ToMCP{Restore: true})
-					m.restoreNote = " waiting for AI…"
-				}
-			}
-			if y < 0 || y/2 >= len(rs) {
-				break
-			}
-			t := rs[y/2]
-			if y%2 == 0 && mouse.X < 9 {
-				m.threads = slices.DeleteFunc(m.threads, func(u thread.Thread) bool { return u.ID == t.ID })
-				delete(m.status, t.ID)
-				m.broadcast(thread.ToMCP{Resolved: t.ID})
-				if m.editing && !m.commit && m.replyTo == t.ID {
-					m.editing = false
-					m.input.Reset()
-				}
-				m.build()
-				break
-			}
-			m.jump(t.File)
-			if i := slices.IndexFunc(m.rows, func(r row) bool { return r.kind == rowThread && r.thread == t.ID }); i >= 0 {
-				m.offset = i
-				m.scroll()
-			}
-		case mouse.Y < len(scr) && scr[mouse.Y] >= 0:
-			i := scr[mouse.Y]
-			switch r := m.rows[i]; r.kind {
-			case rowFile:
-				m.collapsed[path(r.file)] = !m.collapsed[path(r.file)]
-				m.build()
-			case rowComment, rowLine: // retargets an open textarea, keeping the draft
-				m.editing, m.commit, m.replyTo, m.target = true, false, r.thread, r
-				m.input.Placeholder = "Leave a comment (enter: send, alt+enter: newline)"
-				m.input.SetWidth(m.diffWidth() - codeX)
-				// r is the anchor now: scroll the box below it into view.
-				if over := i - m.offset + 2 + lipgloss.Height(m.input.View()) - m.bodyHeight(); over > 0 {
-					m.offset += over
-				}
-				m.scroll()
-				return m, m.input.Focus()
 			}
 		}
 	}
 	return m, nil
 }
 
-// submit commits and pushes with the textarea content as message in commit mode; otherwise it adds
-// the content to the thread being commented on, or starts a new one on target.
+// click handles a left click at (x, y): opening the URL under it, or pressing what is there.
+func (m *model) click(x, y int) tea.Cmd {
+	if m.commit { // the dialog is modal: only its buttons, " Commit " and " Cancel ", on its last line inside the border
+		dx, dy, box := m.dialog()
+		if y == dy+len(box)-2 {
+			switch x -= dx + 2; {
+			case x >= 0 && x < 8:
+				return m.submit()
+			case x >= 10 && x < 18:
+				m.editing, m.commit = false, false
+				m.input.Reset()
+			}
+		}
+		return nil
+	}
+	if u := m.urlAt(x, y); u != "" {
+		return func() tea.Msg { return openedMsg{m.worktree, openURL(u)} }
+	}
+	treeW, h, wh, scr := m.width*3/10, m.bodyHeight(), m.wtHeight(), m.screen()
+	inTree := x < treeW
+	// The comment box's buttons, " Comment " at x 0-8 and " Cancel " at x 11-18 on its last line, indented to the code text.
+	bx, by := treeW+1+codeX, slices.Index(scr, -1)+lipgloss.Height(m.input.View())
+	switch {
+	case y == m.height-1:
+		// Base buttons in the footer, laid out as in View.
+		fx := lipgloss.Width(m.connection() + m.branch + " ← ")
+		for _, b := range m.bases {
+			w := lipgloss.Width(" " + b + " ")
+			if x >= fx && x < fx+w && b != m.base {
+				m.base = b
+				m.gen++
+				return m.load
+			}
+			fx += w + 1
+		}
+		fx++ // two spaces before the commit button
+		if !m.pushing && x >= fx && x < fx+lipgloss.Width(" Commit & Push ") {
+			m.editing, m.commit, m.direct = true, true, false
+			m.input.Placeholder = "Commit message (enter: commit & push, empty: timestamp)"
+			m.input.SetWidth(m.inputWidth())
+			m.scroll()
+			return m.input.Focus()
+		}
+		fx += lipgloss.Width(map[bool]string{false: " Commit & Push ", true: " Pushing… "}[m.pushing]) + 2
+		if x >= fx && x < fx+lipgloss.Width(" Open PR ") {
+			return func() tea.Msg { return prMsg{m.worktree, m.repo.OpenPR()} }
+		}
+	case m.editing && !m.direct && y == by && slices.Contains(scr, -1):
+		switch x := x - bx; {
+		case x >= 0 && x < 9:
+			return m.submit()
+		case x >= 11 && x < 19:
+			m.editing, m.commit, m.direct = false, false, false
+			m.input.Reset()
+			m.scroll()
+		}
+	case inTree && y < wh: // the Worktrees section: a title row, a row per worktree, then the Files title
+		if y > 0 && y < wh-1 && m.wts[y-1] != m.worktree {
+			m.worktree = m.wts[y-1]
+			m.gen++ // drops the old worktree's loads, ending its reload loop
+			m.editing, m.direct = false, false
+			m.input.Reset()
+			m.build()
+			return m.load
+		}
+	case inTree && y < wh+m.treeHeight():
+		if i := m.treeOffset + y - wh; i < len(m.tree) {
+			n := m.tree[i]
+			switch {
+			case n.dir:
+				m.open[n.path] = !m.open[n.path]
+				m.build()
+			case x < 3+2*n.depth: // on the file arrow (after the 1-cell cursor and the indent)
+				m.collapsed[n.path] = !m.collapsed[n.path]
+				m.build()
+			default:
+				m.jump(n.path)
+			}
+		}
+	case inTree:
+		// AI Replies panel: a title row, then 2 rows per thread with " Resolve " at x 0-8 on the first,
+		// or " Restore " at x 0-8 when there are none.
+		y, rs := y-wh-m.treeHeight()-1, m.replies()
+		if len(rs) == 0 && y == 0 && x < 9 {
+			if len(m.peers) == 0 {
+				m.pushErr = errors.New("Claude not connected")
+			} else {
+				m.broadcast(thread.ToMCP{Restore: true})
+				m.restoreNote = " waiting for AI…"
+			}
+		}
+		if y < 0 || y/2 >= len(rs) {
+			break
+		}
+		t := rs[y/2]
+		if y%2 == 0 && x < 9 {
+			m.threads = slices.DeleteFunc(m.threads, func(u thread.Thread) bool { return u.ID == t.ID })
+			delete(m.status, t.ID)
+			m.broadcast(thread.ToMCP{Resolved: t.ID})
+			if m.editing && !m.commit && !m.direct && m.replyTo == t.ID {
+				m.editing = false
+				m.input.Reset()
+			}
+			m.build()
+			break
+		}
+		m.jump(t.File)
+		if i := slices.IndexFunc(m.rows, func(r row) bool { return r.kind == rowThread && r.thread == t.ID }); i >= 0 {
+			m.offset = i
+			m.scroll()
+		}
+	case y >= m.diffHeight() && y < h:
+		return m.clickChat(x-treeW-1, y-m.diffHeight())
+	case y < len(scr) && scr[y] >= 0:
+		i := scr[y]
+		switch r := m.rows[i]; r.kind {
+		case rowFile:
+			m.collapsed[path(r.file)] = !m.collapsed[path(r.file)]
+			m.build()
+		case rowComment, rowLine: // retargets an open textarea, keeping the draft
+			m.editing, m.commit, m.direct, m.replyTo, m.target = true, false, false, r.thread, r
+			m.input.Placeholder = "Leave a comment (enter: send, alt+enter: newline)"
+			m.input.SetWidth(m.diffWidth() - codeX)
+			// r is the anchor now: scroll the box below it into view.
+			if over := i - m.offset + 2 + lipgloss.Height(m.input.View()) - m.diffHeight(); over > 0 {
+				m.offset += over
+			}
+			m.scroll()
+			return m.input.Focus()
+		}
+	}
+	return nil
+}
+
+// clickChat handles a click at (x, y) in the Message AI section: its title opens or closes it; below it are
+// the input row, or the open input with " Send " at x 2-7 on the line under it.
+func (m *model) clickChat(x, y int) tea.Cmd {
+	switch last := y == m.chatHeight()-1; {
+	case y == 0:
+		m.chatOpen, m.chatScroll = !m.chatOpen, 0
+		if m.chatOpen {
+			m.chatUnread = false
+			return m.focusChat()
+		}
+		if m.direct {
+			m.editing, m.direct = false, false
+			m.input.Reset()
+		}
+		m.scroll()
+	case last && !m.direct:
+		return m.focusChat()
+	case last && x >= 2 && x < 8:
+		return m.submit()
+	}
+	return nil
+}
+
+// focusChat moves the textarea to the open Message AI section, keeping the draft.
+func (m *model) focusChat() tea.Cmd {
+	m.editing, m.direct = true, true
+	m.input.Placeholder = "Message Claude (enter: send, alt+enter: newline)"
+	m.input.SetWidth(m.inputWidth())
+	m.scroll()
+	return m.input.Focus()
+}
+
+// submit sends the textarea content to Claude as a message in direct mode, commits and pushes with it as message
+// in commit mode, and otherwise adds it to the thread being commented on, or starts a new one on target.
 func (m *model) submit() tea.Cmd {
+	if m.direct { // the input stays open for the next message
+		body := strings.TrimSpace(m.input.Value())
+		if body == "" {
+			return nil
+		}
+		if len(m.peers) == 0 {
+			m.pushErr = errors.New("Claude not connected") // the draft stays
+			return nil
+		}
+		m.chat = append(m.chat, thread.Message{Author: "user", Body: body})
+		m.chatScroll = 0
+		m.broadcast(thread.ToMCP{Message: body})
+		m.input.Reset()
+		return nil
+	}
 	m.editing = false
 	body := strings.TrimSpace(m.input.Value())
 	m.input.Reset()
@@ -709,7 +842,7 @@ func (m *model) jump(p string) {
 
 // selected reports whether r is what the open textarea comments on.
 func (m model) selected(r row) bool {
-	if !m.editing || m.commit {
+	if !m.editing || m.commit || m.direct {
 		return false
 	}
 	if m.replyTo != "" {
@@ -721,19 +854,101 @@ func (m model) selected(r row) bool {
 // scroll clamps the offsets so neither pane scrolls past its end.
 func (m *model) scroll() {
 	n := len(m.rows)
-	if m.editing && !m.commit {
+	if m.editing && !m.commit && !m.direct {
 		n += lipgloss.Height(m.input.View()) + 1 // room for the inline box below the last row
 	}
-	m.offset = max(0, min(m.offset, n-m.bodyHeight()))
+	m.offset = max(0, min(m.offset, n-m.diffHeight()))
+	m.chatScroll = max(0, min(m.chatScroll, len(m.chatLog(m.diffWidth()))-m.chatLogHeight()))
 	m.treeOffset = max(0, min(m.treeOffset, len(m.tree)-m.treeHeight()))
 }
 
-func (m model) bodyHeight() int {
-	h := m.height - 1
-	if m.commit {
-		h -= lipgloss.Height(m.input.View()) + 1 // + buttons
+func (m model) bodyHeight() int { return max(1, m.height-1) }
+
+// diffHeight is the diff's share of the right pane; the Message AI section under it takes the rest:
+// its title row, or about half the pane when open.
+func (m model) diffHeight() int {
+	ch := 1
+	if m.chatOpen {
+		ch = max(m.bodyHeight()/2, lipgloss.Height(m.input.View())+4)
 	}
-	return max(1, h)
+	return max(1, m.bodyHeight()-ch)
+}
+
+func (m model) chatHeight() int { return m.bodyHeight() - m.diffHeight() }
+
+// chatInput is the bottom of the open Message AI section: the textarea with the Send button under it,
+// or a row standing for it while the textarea is elsewhere.
+func (m model) chatInput(w int) []string {
+	if !m.direct {
+		return []string{"  " + cancelStyle.Inline(true).Width(w-2).MaxWidth(w-2).Render(" Message Claude…")}
+	}
+	var lines []string
+	for _, l := range strings.Split(m.input.View(), "\n") {
+		lines = append(lines, "  "+l)
+	}
+	return append(lines, "  "+buttonStyle.Render(" Send ")+dimStyle.Inline(true).MaxWidth(max(0, w-8)).Render("  → Claude, not about a particular line"))
+}
+
+// chatLogHeight is the lines of the open Message AI section between its title and its input.
+func (m model) chatLogHeight() int {
+	return max(0, m.chatHeight()-1-len(m.chatInput(m.diffWidth())))
+}
+
+// chatLog is the Message AI conversation wrapped to width w.
+func (m model) chatLog(w int) []string {
+	var lines []string
+	for _, msg := range m.chat {
+		who := "you: "
+		if msg.Author == "claude" {
+			who = "claude: "
+		}
+		for i, l := range strings.Split(ansi.Wrap(printable(msg.Body), max(1, w-2-len(who)), ""), "\n") {
+			if i > 0 {
+				who = strings.Repeat(" ", len(who))
+			}
+			lines = append(lines, "  "+dimStyle.Render(who)+l)
+		}
+	}
+	return lines
+}
+
+// chatView renders the Message AI section as lines of width w.
+func (m model) chatView(w int) []string {
+	title := "▶ Message AI"
+	if m.chatOpen {
+		title = "▼ Message AI"
+	}
+	switch {
+	case m.status[chatID] != "":
+		title += "  [AI: " + strings.ReplaceAll(printable(m.status[chatID]), "\n", " ") + "…]"
+	case m.chatUnread:
+		title += "  ● Claude replied"
+	}
+	lines := []string{headerStyle.Inline(true).Width(w).MaxWidth(w).Render(title)}
+	if !m.chatOpen {
+		return lines
+	}
+	log, n := m.chatLog(w), m.chatLogHeight()
+	if len(log) == 0 {
+		log = []string{dimStyle.Render("  Talk with Claude about anything, not tied to a line; it answers here.")}
+	}
+	end := max(0, len(log)-m.chatScroll)
+	log = log[max(0, end-n):end]
+	lines = append(lines, make([]string, n-len(log))...) // the conversation sits on the input, as in a chat
+	lines = fit(append(append(lines, log...), m.chatInput(w)...), m.chatHeight())
+	for i, l := range lines {
+		lines[i] = ansi.Truncate(l, w, "") // a wider line would wrap and push the input down
+	}
+	return lines
+}
+
+// dialog is the commit dialog centered on the body: its position and lines.
+func (m model) dialog() (x, y int, lines []string) {
+	content := append([]string{lipgloss.NewStyle().Bold(true).Render("Commit & Push"), ""}, strings.Split(m.input.View(), "\n")...)
+	content = append(content, "", buttonStyle.Render(" Commit ")+"  "+cancelStyle.Render(" Cancel ")+dimStyle.Render("  → commit all changes & push"))
+	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#8c959f")).Padding(0, 1).Render(strings.Join(content, "\n"))
+	lines = strings.Split(box, "\n")
+	return max(0, (m.width-lipgloss.Width(box))/2), max(0, (m.bodyHeight()-len(lines))/2), lines
 }
 
 // screen maps each line of the diff pane to a row index, or -1 for the lines of the inline comment box,
@@ -741,13 +956,13 @@ func (m model) bodyHeight() int {
 func (m model) screen() []int {
 	anchor := slices.IndexFunc(m.rows, func(r row) bool { return m.selected(r) && r.kind != rowThread })
 	var s []int
-	for i := m.offset; i < len(m.rows) && len(s) < m.bodyHeight(); i++ {
+	for i := m.offset; i < len(m.rows) && len(s) < m.diffHeight(); i++ {
 		s = append(s, i)
 		if i == anchor {
 			s = append(s, slices.Repeat([]int{-1}, lipgloss.Height(m.input.View())+1)...)
 		}
 	}
-	return s[:min(len(s), m.bodyHeight())]
+	return s[:min(len(s), m.diffHeight())]
 }
 
 // replies are the threads waiting on the user: Claude wrote the last message.
@@ -770,7 +985,18 @@ func (m model) wtHeight() int {
 // up to half: a title row, then 2 rows per reply or the Restore row when there are none.
 func (m model) treeHeight() int {
 	h := m.bodyHeight() - m.wtHeight()
-	return h - min(max(2, 1+2*len(m.replies())), h/2)
+	return max(0, h-min(max(2, 1+2*len(m.replies())), h/2))
+}
+
+// inputWidth is the textarea's width in the current mode.
+func (m model) inputWidth() int {
+	switch {
+	case m.commit:
+		return min(m.width-6, 72)
+	case m.direct:
+		return m.diffWidth() - 2
+	}
+	return m.diffWidth() - codeX
 }
 
 func (m model) diffWidth() int { return m.width - m.width*3/10 - 1 }
@@ -797,7 +1023,7 @@ func (m model) View() tea.View {
 		if len(w.peers) > 0 {
 			mark, st = "●", addStyle
 		}
-		if n := len(w.replies()); n > 0 {
+		if n := len(w.replies()) + map[bool]int{true: 1}[w.chatUnread]; n > 0 {
 			badge = fmt.Sprintf(" ●%d", n)
 		}
 		if w == m.worktree { // plain: inner colors would cut the row background
@@ -859,7 +1085,7 @@ func (m model) View() tea.View {
 		tree = append(tree, st.Inline(true).Width(treeW).MaxWidth(treeW).Render(text))
 	}
 	w := max(0, treeW-9)
-	tree = append(tree, slices.Repeat([]string{""}, wh+th-len(tree))...)
+	tree = fit(tree, wh+th)
 	tree = append(tree, headerStyle.Inline(true).Width(treeW).MaxWidth(treeW).Render(fmt.Sprintf(" AI Replies (%d)", len(rs))))
 	if len(rs) == 0 {
 		tree = append(tree, buttonStyle.Render(" Restore ")+dimStyle.Inline(true).MaxWidth(w).Render(cmp.Or(m.restoreNote, " ask Claude to restore threads")))
@@ -870,30 +1096,31 @@ func (m model) View() tea.View {
 			buttonStyle.Render(" Resolve ")+threadStyle.Inline(true).Width(w).MaxWidth(w).Render(printable(fmt.Sprintf(" %s %s%d", t.File, sides[t.Side], t.Line))),
 			dimStyle.Inline(true).MaxWidth(treeW).Render("  "+printable(msg)))
 	}
-	tree = tree[:h] // entries past the panel are not shown
+	tree = fit(tree, h) // entries past the panel are not shown
 
 	scr := m.screen()
 	first := slices.Index(scr, -1) // the inline box's first line
-	// The textarea and its buttons: inline in the diff in comment mode, under the body in commit mode.
+	dh := m.diffHeight()
+	// The textarea is in the commit dialog, at the bottom of the open Message AI section, or inline in the diff.
 	var box []string
-	if m.editing {
-		btn, hint := " Commit ", "  → commit all changes & push"
-		if !m.commit {
-			k := m.target.key()
-			t := thread.Thread{File: path(m.target.file), Side: k.side, Line: k.line}
-			if i := slices.IndexFunc(m.threads, func(t thread.Thread) bool { return t.ID == m.replyTo }); i >= 0 {
-				t = m.threads[i]
-			}
-			btn, hint = " Comment ", printable(fmt.Sprintf("  → %s %s%d", t.File, sides[t.Side], t.Line))
-		}
-		box = append(strings.Split(m.input.View(), "\n"), buttonStyle.Render(btn)+"  "+cancelStyle.Render(" Cancel ")+dimStyle.Render(hint))
+	switch {
+	case m.direct:
 		if v.Cursor = m.input.Cursor(); v.Cursor != nil {
-			switch {
-			case m.commit:
-				v.Cursor.Y += h // the textarea starts right below the body
-			case first < 0 || first+v.Cursor.Y >= h: // the box is scrolled out
+			v.Cursor.X += treeW + 1 + 2
+			v.Cursor.Y += h - lipgloss.Height(m.input.View()) - 1
+		}
+	case m.editing && !m.commit:
+		k := m.target.key()
+		t := thread.Thread{File: path(m.target.file), Side: k.side, Line: k.line}
+		if i := slices.IndexFunc(m.threads, func(t thread.Thread) bool { return t.ID == m.replyTo }); i >= 0 {
+			t = m.threads[i]
+		}
+		hint := printable(fmt.Sprintf("  → %s %s%d", t.File, sides[t.Side], t.Line))
+		box = append(strings.Split(m.input.View(), "\n"), buttonStyle.Render(" Comment ")+"  "+cancelStyle.Render(" Cancel ")+dimStyle.Render(hint))
+		if v.Cursor = m.input.Cursor(); v.Cursor != nil {
+			if first < 0 || first+v.Cursor.Y >= dh { // the box is scrolled out
 				v.Cursor = nil
-			default:
+			} else {
 				v.Cursor.X += treeW + 1 + codeX
 				v.Cursor.Y += first
 			}
@@ -958,6 +1185,7 @@ func (m model) View() tea.View {
 	if len(m.rows) == 0 {
 		diff = append(diff, dimStyle.Render("no changes against "+m.base))
 	}
+	diff = append(fit(diff, dh), m.chatView(diffW)...)
 
 	var add, del int
 	for _, f := range m.files {
@@ -986,11 +1214,131 @@ func (m model) View() tea.View {
 		dimStyle.Render(strings.Repeat("│\n", h-1)+"│"),
 		lipgloss.NewStyle().Width(diffW).Height(h).Render(strings.Join(diff, "\n")),
 	)
-	if m.commit {
-		view += "\n" + strings.Join(box, "\n")
-	}
 	v.Content = view + "\n" + lipgloss.NewStyle().Inline(true).MaxWidth(m.width).Render(footer)
+	if spans := m.selSpans(); spans != nil {
+		lines := strings.Split(v.Content, "\n")
+		for y, sp := range spans {
+			if y < len(lines) {
+				l := lines[y]
+				lines[y] = ansi.Truncate(l, sp[0], "") + selStyle.Render(ansi.Strip(ansi.Cut(l, sp[0], sp[1]))) + ansi.TruncateLeft(l, sp[1], "")
+			}
+		}
+		v.Content = strings.Join(lines, "\n")
+	}
+	if m.commit {
+		dx, dy, box := m.dialog()
+		lines := strings.Split(v.Content, "\n")
+		for i, b := range box {
+			if y := dy + i; y < len(lines) {
+				lines[y] = ansi.Truncate(lines[y], dx, "") + b + ansi.TruncateLeft(lines[y], dx+lipgloss.Width(b), "")
+			}
+		}
+		v.Content = strings.Join(lines, "\n")
+		if v.Cursor = m.input.Cursor(); v.Cursor != nil {
+			v.Cursor.X += dx + 2 // border and padding
+			v.Cursor.Y += dy + 3 // border, title and blank line
+		}
+	}
 	return v
+}
+
+// selSpans maps each screen line the selection covers to its cells [l, r), or is nil without a selection.
+// As in a terminal it runs from the earlier point to the later one, but within the pane it started in,
+// and without the gutter and line numbers when it lies in code text.
+func (m model) selSpans() map[int][2]int {
+	s := m.sel
+	if !s.dragged {
+		return nil
+	}
+	treeW := m.width * 3 / 10
+	l, r := 0, m.width
+	switch {
+	case s.y0 >= m.bodyHeight(): // the footer spans the screen
+	case s.x0 < treeW:
+		r = treeW
+	default:
+		l = treeW + 1
+		if min(s.x0, s.x1) > l+codeX {
+			l += codeX + 1 // after the +/- marker
+		}
+	}
+	ax, ay, bx, by := s.x0, s.y0, s.x1, s.y1
+	if by < ay || by == ay && bx < ax {
+		ax, ay, bx, by = bx, by, ax, ay
+	}
+	spans := map[int][2]int{}
+	for y := max(0, ay); y <= min(by, m.height-1); y++ {
+		a, b := l, r
+		if y == ay {
+			a = max(l, min(ax, r))
+		}
+		if y == by {
+			b = min(r, max(bx+1, l))
+		}
+		if a < b {
+			spans[y] = [2]int{a, b}
+		}
+	}
+	return spans
+}
+
+// selectedText is the selected text, each line without trailing spaces.
+func (m model) selectedText() string {
+	spans := m.selSpans()
+	var out []string
+	for y, l := range strings.Split(ansi.Strip(m.View().Content), "\n") {
+		if sp, ok := spans[y]; ok {
+			out = append(out, strings.TrimRight(ansi.Cut(l, sp[0], sp[1]), " "))
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+// urlAt returns the URL shown at (x, y), or "". A URL running to the end of its line may be wrapped or cut
+// on screen, so it is completed from the thread messages that contain it.
+func (m model) urlAt(x, y int) string {
+	lines := strings.Split(ansi.Strip(m.View().Content), "\n")
+	if y < 0 || y >= len(lines) {
+		return ""
+	}
+	l := lines[y]
+	for _, loc := range urlRe.FindAllStringIndex(l, -1) {
+		u := strings.TrimRight(l[loc[0]:loc[1]], ".,;:!?)]}'")
+		if a := ansi.StringWidth(l[:loc[0]]); x < a || x >= a+ansi.StringWidth(u) {
+			continue
+		}
+		if rest := strings.TrimLeft(l[loc[1]:], " "); rest == "" || strings.HasPrefix(rest, "│") {
+			for _, t := range m.threads {
+				for _, msg := range t.Messages {
+					for _, full := range urlRe.FindAllString(msg.Body, -1) {
+						if full = strings.TrimRight(full, ".,;:!?)]}'"); len(full) > len(u) && strings.HasPrefix(full, u) {
+							return full
+						}
+					}
+				}
+			}
+		}
+		return u
+	}
+	return ""
+}
+
+// openURL opens u in the default browser.
+func openURL(u string) error {
+	name := "xdg-open"
+	if runtime.GOOS == "darwin" {
+		name = "open"
+	}
+	return exec.Command(name, u).Run()
+}
+
+// fit pads lines with empty ones, or cuts them, to n.
+func fit(lines []string, n int) []string {
+	n = max(0, n)
+	if len(lines) >= n {
+		return lines[:n]
+	}
+	return append(lines, make([]string, n-len(lines))...)
 }
 
 // connection is the footer's leading Claude connection indicator.

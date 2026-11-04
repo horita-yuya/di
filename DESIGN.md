@@ -100,6 +100,7 @@ status は TUI の `status map[thread ID]string` にのみ持ち (mcp はキャ�
   - TUI → mcp: `ToMCP{thread?, resolved?, restore?}` を接続中の全 mcp へ broadcast
     - `thread`: ユーザーが新規コメント / 返信した時のスレッド全体。mcp が接続した時は「最後が user」のスレッドを全部送る。
     - `resolved`: Resolve したスレッド ID。`restore`: AI Replies パネルの `Restore` (Claude に復元を依頼)。
+    - `message`: Message AI から送った、ファイルや行に紐づかないメッセージ。
   - mcp → TUI: `ToTUI{reply?, restore?, status?}`。`reply` は `{"id", "body"}` (Claude の返信) でメッセージ追加。
     `restore` はスレッド配列で、ID が未登録 (冪等) かつメッセージのあるものを追加し、seq を各 ID 以上に上げる。
     空配列でも届くよう omitempty を付けない (null = restore ではない)。
@@ -140,12 +141,28 @@ git 実行は tea.Cmd 内 (goroutine) で行い UI をブロックしない。
   ボタンの後ろには dim でヒント → クリック後 `waiting for AI…` → `restore` 受信で `restored N` (N = 実際に追加した数) / `nothing to restore` を表示
   (user 待ちで復元されたスレッドはパネルに出ないため)。再クリックで再送し `requested…` に戻る。
 
+### Message AI
+- ファイルや行に紐づかない Claude との会話。worktree ごとに `chat []Message` としてメモリ上に持つ (スレッドとは別。AI Replies には出ない)。
+- diff ペインの最下部に file header と同じグレーのタイトル行 `▶ Message AI`。デフォルトは閉じていて diff がペインのほぼ全部を使う。
+  閉じている時は Claude の作業中なら `[AI: <status>…]`、未読の返信があれば `● Claude replied` をタイトルに付ける (Worktrees の `●N` にも 1 として数える)。
+- タイトルのクリックで開閉。開くと diff ペインの下半分 (最低 textarea + 4 行) を使い、タイトル → 会話ログ (`you:` / `claude:`、折り返し、下詰め、
+  ホイールでスクロール) → textarea (幅 = diff ペイン - 2) + `Send` ボタン。開くと textarea がここに移ってフォーカスする (書きかけは保持)。
+  コメント入力中は textarea の代わりに入力欄風の 1 行を出し、クリックでこちらに戻す。閉じると textarea も閉じる。
+- 送信で `chat` に追加して接続中の mcp に `message` を送る。textarea は開いたまま (続けて送れる)。未接続ならエラー表示で下書きは残す。
+- Claude は予約 ID `message` で `reply_comment` / `set_status` する。Restore でも ID `message` のスレッドとして返ってくれば (chat が空なら) 会話を戻す。
+
 ### Diff
 - 平坦な row 配列 (file header / hunk header / code line / comment) を自前でスクロール描画する (viewport 不要)。
 - file header: `▼ path  +N -M` / collapsed は `▶ path` のみ。rename は `old → new`、binary は "Binary file"。ファイル境界が分かるようグレー背景 (`#6e7781`) に白太字。
 - code line: `old行番号 new行番号 ±内容`、追加=緑, 削除=赤。横はみ出しは切り詰め。
 - config で collapsed なファイルはデフォルトで `▶`。ユーザーは開ける。
-- 操作はマウスのみ (キーは `ctrl+c` 終了だけ)。ホイールでポインタ下のペインをスクロール、ファイルヘッダのクリックで開閉、
+- 操作はマウスのみ (キーは `ctrl+c` 終了だけ)。クリックは左ボタンの press → release を同じ位置で離した時に処理する (動かしたら選択)。
+  ドラッグで選択: 端末と同じく始点から終点まで行をまたいで選ぶが、始点のペイン (ツリー / diff / footer) の列に限る。
+  diff ペインで始点と終点が両方コード本文 (± の後) にあれば gutter と行番号を除く。選択範囲は反転色で表示し、離した時に
+  OSC 52 (`tea.SetClipboard`) でクリップボードへコピー、次の press かホイールで消える。
+  クリック位置の画面テキストに URL (`https?://…`) があれば (darwin は `open`, 他は `xdg-open`) で開き、他の動作はしない。
+  行末まで続く URL は折り返し / 切り詰めの可能性があるので、スレッド本文にそれで始まる URL があれば全体を開く。
+ホイールでポインタ下のペインをスクロール、ファイルヘッダのクリックで開閉、
   コード行のクリックでコメント入力 (ホバー行の gutter に `+` を表示、入力中のクリックは書きかけのまま対象を切替)。
   bubbles/textarea + `Comment` / `Cancel` ボタンの box は diff ペイン内の対象行 (返信ならスレッドの `Comment` 行) の直下に inline で描画し、コード本文の開始位置 (gutter 2 + 行番号 10 = 12 桁目) に揃える。
   `screen()` が diff ペインの各行 → row index (box の行は -1) を返し、描画とマウス判定の両方で使う。開いた時だけ box が見えるようにスクロールする。
@@ -154,7 +171,8 @@ git 実行は tea.Cmd 内 (goroutine) で行い UI をブロックしない。
 - スレッド末尾の `Comment` ボタンでスレッドにコメントを追加 (送信で Claude に push)。
   対象 (Side, Line) の行内容が LineText と一致しなければ outdated 扱いで file header 直下に表示。
 - footer: `<status> <branch> ← [bases]  Commit & Push  Open PR  N files  +A -D`。
-  Commit & Push のメッセージ入力は従来通り画面下部の box。
+  Commit & Push のメッセージは画面中央のダイアログ (角丸枠、タイトル、textarea (幅 min(画面-6, 72))、`Commit` / `Cancel`) で入力する。
+  View の最後に描画済みの行へ重ねる。開いている間は modal で、ボタン以外のクリックは無視する。
 
 ### 制御文字
 diff 行 / hunk header / ファイル名 / スレッド本文 / git エラーは信頼できないので、描画前に `printable()` で C0 (tab と改行以外)・DEL・C1 を `�` に置き換える
@@ -183,6 +201,8 @@ go-sdk の stdio サーバー。cwd の repo を対象とする。
   - `restore_comments {threads}` — スレッド (元の id, file, side, line, line_text, context, 全履歴) を TUI に送り、キャッシュに upsert。TUI 未接続ならエラー。
 - TUI からの `resolved` はキャッシュから削除し「対応不要」と channel で通知 (meta `{"thread_id"}`)。
   `restore` は「この会話の未 resolve で list_comments に無いスレッドを restore_comments で送れ (無ければ空配列)」と channel で通知 (meta `{"kind": "restore"}`)。
+  `message` は「di の Message AI からのメッセージ。id `message` で reply_comment / set_status して答える」+ 本文を channel で通知 (meta `{"kind": "message"}`)。
+  restore の依頼文にも「Message AI の会話があれば id `message` のスレッドとして含める」を足す。
 
 ### Claude Code 側のセットアップ (README に記載)
 ```

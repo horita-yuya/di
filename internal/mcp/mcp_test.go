@@ -227,6 +227,13 @@ func TestRelay(t *testing.T) {
 		t.Fatalf("notification %+v", n)
 	}
 
+	// A message from the Message AI section reaches Claude as is, without a thread.
+	enc.Encode(thread.ToMCP{Message: "how is it going?"})
+	n = recv(t, notes)
+	if !equalMeta(n.Meta, map[string]string{"kind": "message"}) || !strings.HasSuffix(n.Content, "\n\nhow is it going?") {
+		t.Fatalf("notification %+v", n)
+	}
+
 	// When the TUI exits, its threads are gone and replies fail.
 	tui.Close()
 	deadline := time.Now().Add(5 * time.Second)
