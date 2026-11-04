@@ -40,6 +40,8 @@ var (
 	cursorBg     = lipgloss.Color("#b6e3ff")
 	buttonStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ffffff")).Background(lipgloss.Color("#1f883d"))
 	cancelStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#1f2328")).Background(lipgloss.Color("#eaeef2"))
+
+	sides = map[string]string{"old": "L", "new": "R"} // GitHub's left/right line notation
 )
 
 type rowKind int
@@ -117,6 +119,7 @@ type model struct {
 	err    error
 
 	threads []thread.Thread
+	seq     int // last thread ID; IDs stay unique after a thread is resolved
 	peers   []net.Conn
 
 	collapsed map[string]bool // file path → folded
@@ -140,8 +143,7 @@ type model struct {
 	width, height int
 }
 
-func Run(repo *git.Repo, slug string, cfg config.RepoConfig, base string) error {
-	sock := thread.SocketPath(repo.GitDir)
+func Run(repo *git.Repo, sock, slug string, cfg config.RepoConfig, base string) error {
 	if c, err := net.Dial("unix", sock); err == nil {
 		c.Close()
 		return errors.New("di is already running in this worktree")
@@ -160,7 +162,8 @@ func Run(repo *git.Repo, slug string, cfg config.RepoConfig, base string) error 
 	input.ShowLineNumbers = false
 	input.SetHeight(5)
 	p := tea.NewProgram(model{repo: repo, slug: slug, cfg: cfg, base: base, bases: slices.Compact([]string{base, "origin/main", "HEAD"}), input: input,
-		collapsed: map[string]bool{}, open: map[string]bool{}})
+		collapsed: map[string]bool{}, open: map[string]bool{},
+		seq: int(time.Now().Unix())}) // new IDs stay above those of threads restored from an earlier run
 	go func() {
 		for {
 			c, err := ln.Accept()
@@ -171,11 +174,11 @@ func Run(repo *git.Repo, slug string, cfg config.RepoConfig, base string) error 
 			go func() {
 				defer func() { c.Close(); p.Send(peerGoneMsg{c}) }()
 				for dec := json.NewDecoder(c); ; {
-					var r thread.Reply
-					if dec.Decode(&r) != nil {
+					var msg thread.ToTUI
+					if dec.Decode(&msg) != nil {
 						return
 					}
-					p.Send(r)
+					p.Send(msg)
 				}
 			}()
 		}
@@ -200,7 +203,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		m.input.SetWidth(msg.Width)
+		m.input.SetWidth(map[bool]int{false: m.diffWidth(), true: m.width}[m.commit])
 		m.build() // rewraps threads
 	case loadedMsg:
 		if msg.gen != m.gen {
@@ -225,7 +228,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.peers = append(m.peers, msg.conn)
 		for _, t := range m.threads {
 			if t.Messages[len(t.Messages)-1].Author == "user" {
-				json.NewEncoder(msg.conn).Encode(t)
+				json.NewEncoder(msg.conn).Encode(thread.ToMCP{Thread: &t})
 			}
 		}
 	case peerGoneMsg:
@@ -238,12 +241,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case prMsg:
 		m.pushErr = msg.err
-	case thread.Reply:
-		i := slices.IndexFunc(m.threads, func(t thread.Thread) bool { return t.ID == msg.ID })
-		if i < 0 {
-			return m, nil
+	case thread.ToTUI:
+		if r := msg.Reply; r != nil {
+			if i := slices.IndexFunc(m.threads, func(t thread.Thread) bool { return t.ID == r.ID }); i >= 0 {
+				m.threads[i].Messages = append(m.threads[i].Messages, thread.Message{Author: "claude", Body: r.Body})
+			}
 		}
-		m.threads[i].Messages = append(m.threads[i].Messages, thread.Message{Author: "claude", Body: msg.Body})
+		for _, t := range msg.Restore {
+			n, _ := strconv.Atoi(t.ID)
+			m.seq = max(m.seq, n)
+			if len(t.Messages) > 0 && !slices.ContainsFunc(m.threads, func(u thread.Thread) bool { return u.ID == t.ID }) {
+				m.threads = append(m.threads, t)
+			}
+		}
 		m.build()
 	case tea.PasteMsg:
 		if m.editing {
@@ -282,8 +292,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		_, click := msg.(tea.MouseClickMsg)
 		mouse := msg.Mouse()
 		m.mouseX, m.mouseY = mouse.X, mouse.Y
-		treeW, h := m.width*3/10, m.bodyHeight()
+		treeW, h, scr := m.width*3/10, m.bodyHeight(), m.screen()
 		inTree := mouse.X < treeW
+		// The input's buttons, " Comment " at x 0-8 and " Cancel " at x 11-18: under the body in commit mode,
+		// on the inline box's last line in comment mode.
+		bx, by := 0, h+lipgloss.Height(m.input.View())
+		if !m.commit {
+			bx, by = treeW+1, slices.Index(scr, -1)+lipgloss.Height(m.input.View())
+		}
 		switch {
 		case mouse.Button == tea.MouseWheelUp || mouse.Button == tea.MouseWheelDown:
 			d := 3
@@ -316,6 +332,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !m.pushing && mouse.X >= x && mouse.X < x+lipgloss.Width(" Commit & Push ") {
 				m.editing, m.commit = true, true
 				m.input.Placeholder = "Commit message (enter: commit & push, empty: timestamp)"
+				m.input.SetWidth(m.width)
 				m.scroll()
 				return m, m.input.Focus()
 			}
@@ -323,20 +340,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if mouse.X >= x && mouse.X < x+lipgloss.Width(" Open PR ") {
 				return m, func() tea.Msg { return prMsg{m.repo.OpenPR()} }
 			}
-		case mouse.Y >= h:
-			// Buttons under the textarea: " Comment " at x 0-8, " Cancel " at x 11-18.
-			if m.editing && mouse.Y == h+lipgloss.Height(m.input.View()) {
-				switch {
-				case mouse.X < 9:
-					cmd := m.submit()
-					return m, cmd
-				case mouse.X >= 11 && mouse.X < 19:
-					m.editing, m.commit = false, false
-					m.input.Reset()
-					m.scroll()
+			x += lipgloss.Width(" Open PR ") + 2
+			if mouse.X >= x && mouse.X < x+lipgloss.Width(" Restore ") {
+				if len(m.peers) == 0 {
+					m.pushErr = errors.New("Claude not connected")
+				} else {
+					m.broadcast(thread.ToMCP{Restore: true})
 				}
 			}
-		case inTree:
+		case m.editing && mouse.Y == by && (m.commit || slices.Contains(scr, -1)):
+			switch x := mouse.X - bx; {
+			case x >= 0 && x < 9:
+				cmd := m.submit()
+				return m, cmd
+			case x >= 11 && x < 19:
+				m.editing, m.commit = false, false
+				m.input.Reset()
+				m.scroll()
+			}
+		case mouse.Y >= h: // the commit message input
+		case inTree && mouse.Y < m.treeHeight():
 			if i := m.treeOffset + mouse.Y; i < len(m.tree) {
 				n := m.tree[i]
 				switch {
@@ -350,18 +373,44 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.jump(n.path)
 				}
 			}
-		default:
-			if i := m.offset + mouse.Y; i < len(m.rows) {
-				switch r := m.rows[i]; {
-				case r.kind == rowFile:
-					m.collapsed[path(r.file)] = !m.collapsed[path(r.file)]
-					m.build()
-				case r.kind == rowComment || r.kind == rowLine: // retargets an open textarea, keeping the draft
-					m.editing, m.commit, m.replyTo, m.target = true, false, r.thread, r
-					m.input.Placeholder = "Leave a comment (enter: send, alt+enter: newline)"
-					m.scroll()
-					return m, m.input.Focus()
+		case inTree:
+			// Claude replies panel: a title row, then 2 rows per thread with " Resolve " at x 0-8 on the first.
+			y, rs := mouse.Y-m.treeHeight()-1, m.replies()
+			if y < 0 || y/2 >= len(rs) {
+				break
+			}
+			t := rs[y/2]
+			if y%2 == 0 && mouse.X < 9 {
+				m.threads = slices.DeleteFunc(m.threads, func(u thread.Thread) bool { return u.ID == t.ID })
+				m.broadcast(thread.ToMCP{Resolved: t.ID})
+				if m.editing && !m.commit && m.replyTo == t.ID {
+					m.editing = false
+					m.input.Reset()
 				}
+				m.build()
+				break
+			}
+			m.jump(t.File)
+			if i := slices.IndexFunc(m.rows, func(r row) bool { return r.kind == rowThread && r.thread == t.ID }); i >= 0 {
+				m.offset = i
+				m.scroll()
+			}
+		case mouse.Y < len(scr) && scr[mouse.Y] >= 0:
+			i := scr[mouse.Y]
+			switch r := m.rows[i]; r.kind {
+			case rowFile:
+				m.collapsed[path(r.file)] = !m.collapsed[path(r.file)]
+				m.build()
+			case rowComment, rowLine: // retargets an open textarea, keeping the draft
+				m.editing, m.commit, m.replyTo, m.target = true, false, r.thread, r
+				m.input.Placeholder = "Leave a comment (enter: send, alt+enter: newline)"
+				m.input.SetWidth(m.diffWidth())
+				// r is the anchor now: scroll the box below it into view.
+				if over := i - m.offset + 2 + lipgloss.Height(m.input.View()) - m.bodyHeight(); over > 0 {
+					m.offset += over
+				}
+				m.scroll()
+				return m, m.input.Focus()
 			}
 		}
 	}
@@ -388,7 +437,7 @@ func (m *model) submit() tea.Cmd {
 	user := thread.Message{Author: "user", Body: body}
 	if i := slices.IndexFunc(m.threads, func(t thread.Thread) bool { return t.ID == m.replyTo }); i >= 0 {
 		m.threads[i].Messages = append(m.threads[i].Messages, user)
-		m.broadcast(m.threads[i])
+		m.broadcast(thread.ToMCP{Thread: &m.threads[i]})
 	} else {
 		r := m.target
 		k := r.key()
@@ -396,8 +445,9 @@ func (m *model) submit() tea.Cmd {
 		for _, l := range r.frag.Lines[max(0, r.idx-8):min(len(r.frag.Lines), r.idx+9)] {
 			ctx = append(ctx, strings.TrimSuffix(l.String(), "\n"))
 		}
+		m.seq++
 		m.threads = append(m.threads, thread.Thread{
-			ID:       strconv.Itoa(len(m.threads) + 1),
+			ID:       strconv.Itoa(m.seq),
 			File:     path(r.file),
 			Side:     k.side,
 			Line:     k.line,
@@ -405,15 +455,15 @@ func (m *model) submit() tea.Cmd {
 			Context:  strings.Join(ctx, "\n"),
 			Messages: []thread.Message{user},
 		})
-		m.broadcast(m.threads[len(m.threads)-1])
+		m.broadcast(thread.ToMCP{Thread: &m.threads[len(m.threads)-1]})
 	}
 	m.build()
 	return nil
 }
 
-// broadcast sends t to every connected `di mcp`, dropping peers that went away.
-func (m *model) broadcast(t thread.Thread) {
-	m.peers = slices.DeleteFunc(m.peers, func(c net.Conn) bool { return json.NewEncoder(c).Encode(t) != nil })
+// broadcast sends msg to every connected `di mcp`, dropping peers that went away.
+func (m *model) broadcast(msg thread.ToMCP) {
+	m.peers = slices.DeleteFunc(m.peers, func(c net.Conn) bool { return json.NewEncoder(c).Encode(msg) != nil })
 }
 
 // build regenerates rows and the visible tree from files, threads and fold state,
@@ -565,8 +615,7 @@ func (m *model) jump(p string) {
 	m.build()
 	m.offset = m.header(p)
 	if i := slices.IndexFunc(m.tree, func(n node) bool { return n.path == p }); i >= 0 {
-		h := m.bodyHeight()
-		m.treeOffset = max(min(m.treeOffset, i), i-h+1)
+		m.treeOffset = max(min(m.treeOffset, i), i-m.treeHeight()+1)
 	}
 	m.scroll()
 }
@@ -584,17 +633,50 @@ func (m model) selected(r row) bool {
 
 // scroll clamps the offsets so neither pane scrolls past its end.
 func (m *model) scroll() {
-	h := m.bodyHeight()
-	m.offset = max(0, min(m.offset, len(m.rows)-h))
-	m.treeOffset = max(0, min(m.treeOffset, len(m.tree)-h))
+	n := len(m.rows)
+	if m.editing && !m.commit {
+		n += lipgloss.Height(m.input.View()) + 1 // room for the inline box below the last row
+	}
+	m.offset = max(0, min(m.offset, n-m.bodyHeight()))
+	m.treeOffset = max(0, min(m.treeOffset, len(m.tree)-m.treeHeight()))
 }
 
 func (m model) bodyHeight() int {
 	h := m.height - 1
-	if m.editing {
+	if m.commit {
 		h -= lipgloss.Height(m.input.View()) + 1 // + buttons
 	}
 	return max(1, h)
+}
+
+// screen maps each line of the diff pane to a row index, or -1 for the lines of the inline comment box,
+// which follows its anchor: the target code line, or the Comment button of the thread being replied to.
+func (m model) screen() []int {
+	anchor := slices.IndexFunc(m.rows, func(r row) bool { return m.selected(r) && r.kind != rowThread })
+	var s []int
+	for i := m.offset; i < len(m.rows) && len(s) < m.bodyHeight(); i++ {
+		s = append(s, i)
+		if i == anchor {
+			s = append(s, slices.Repeat([]int{-1}, lipgloss.Height(m.input.View())+1)...)
+		}
+	}
+	return s[:min(len(s), m.bodyHeight())]
+}
+
+// replies are the threads waiting on the user: Claude wrote the last message.
+func (m model) replies() []thread.Thread {
+	return slices.DeleteFunc(slices.Clone(m.threads), func(t thread.Thread) bool {
+		return t.Messages[len(t.Messages)-1].Author != "claude"
+	})
+}
+
+// treeHeight is the tree's share of the left pane; the Claude replies panel takes the rest, up to half.
+func (m model) treeHeight() int {
+	h := m.bodyHeight()
+	if n := len(m.replies()); n > 0 {
+		return h - min(1+2*n, h/2)
+	}
+	return h
 }
 
 func (m model) diffWidth() int { return m.width - m.width*3/10 - 1 }
@@ -610,17 +692,12 @@ func (m model) View() tea.View {
 	treeW := m.width * 3 / 10
 	diffW := m.diffWidth()
 
-	var replied []string // files with a Claude reply the user hasn't answered
-	for _, t := range m.threads {
-		if t.Messages[len(t.Messages)-1].Author == "claude" {
-			replied = append(replied, t.File)
-		}
-	}
+	rs, th := m.replies(), m.treeHeight()
 	var tree []string
-	for _, n := range m.tree[m.treeOffset:min(len(m.tree), m.treeOffset+h)] {
+	for _, n := range m.tree[m.treeOffset:min(len(m.tree), m.treeOffset+th)] {
 		cur := !n.dir && n.path == m.current
-		hl := slices.ContainsFunc(replied, func(f string) bool {
-			return f == n.path || n.dir && !m.open[n.path] && strings.HasPrefix(f, n.path+"/")
+		hl := slices.ContainsFunc(rs, func(t thread.Thread) bool {
+			return t.File == n.path || n.dir && !m.open[n.path] && strings.HasPrefix(t.File, n.path+"/")
 		})
 		plain := cur || hl // inner colors would cut the row background
 		text := strings.Repeat("  ", n.depth)
@@ -665,13 +742,58 @@ func (m model) View() tea.View {
 		}
 		tree = append(tree, st.Inline(true).Width(treeW).MaxWidth(treeW).Render(text))
 	}
+	if len(rs) > 0 {
+		title := fmt.Sprintf("─ Claude replies (%d) ", len(rs))
+		tree = append(tree, slices.Repeat([]string{""}, th-len(tree))...)
+		tree = append(tree, dimStyle.Inline(true).MaxWidth(treeW).Render(title+strings.Repeat("─", max(0, treeW-lipgloss.Width(title)))))
+		for _, t := range rs {
+			w := max(0, treeW-9)
+			msg, _, _ := strings.Cut(t.Messages[len(t.Messages)-1].Body, "\n")
+			tree = append(tree,
+				buttonStyle.Render(" Resolve ")+threadStyle.Inline(true).Width(w).MaxWidth(w).Render(fmt.Sprintf(" %s %s%d", t.File, sides[t.Side], t.Line)),
+				dimStyle.Inline(true).MaxWidth(treeW).Render("  "+msg))
+		}
+		tree = tree[:h] // entries past the panel are not shown
+	}
 
+	scr := m.screen()
+	first := slices.Index(scr, -1) // the inline box's first line
+	// The textarea and its buttons: inline in the diff in comment mode, under the body in commit mode.
+	var box []string
+	if m.editing {
+		btn, hint := " Commit ", "  → commit all changes & push"
+		if !m.commit {
+			k := m.target.key()
+			t := thread.Thread{File: path(m.target.file), Side: k.side, Line: k.line}
+			if i := slices.IndexFunc(m.threads, func(t thread.Thread) bool { return t.ID == m.replyTo }); i >= 0 {
+				t = m.threads[i]
+			}
+			btn, hint = " Comment ", fmt.Sprintf("  → %s %s%d", t.File, sides[t.Side], t.Line)
+		}
+		box = append(strings.Split(m.input.View(), "\n"), buttonStyle.Render(btn)+"  "+cancelStyle.Render(" Cancel ")+dimStyle.Render(hint))
+		if v.Cursor = m.input.Cursor(); v.Cursor != nil {
+			switch {
+			case m.commit:
+				v.Cursor.Y += h // the textarea starts right below the body
+			case first < 0 || first+v.Cursor.Y >= h: // the box is scrolled out
+				v.Cursor = nil
+			default:
+				v.Cursor.X += treeW + 1
+				v.Cursor.Y += first
+			}
+		}
+	}
 	hover := -1
-	if m.mouseX >= treeW && m.mouseY < h {
-		hover = m.offset + m.mouseY
+	if m.mouseX >= treeW && m.mouseY < len(scr) {
+		hover = scr[m.mouseY]
 	}
 	var diff []string
-	for i, r := range m.rows[m.offset:min(len(m.rows), m.offset+h)] {
+	for y, i := range scr {
+		if i < 0 {
+			diff = append(diff, ansi.Truncate(box[y-first], diffW, ""))
+			continue
+		}
+		r := m.rows[i]
 		var text string
 		st := lipgloss.NewStyle()
 		pre, btn := "  ", "" // gutter, button after it
@@ -695,7 +817,7 @@ func (m model) View() tea.View {
 		case rowLine:
 			op := r.frag.Lines[r.idx].Op
 			text = fmt.Sprintf("%4s %4s %s%s", num(r.old), num(r.new), op, r.text)
-			if m.offset+i == hover || m.selected(r) {
+			if i == hover || m.selected(r) {
 				pre, btn = "", "+ "
 			}
 			switch op {
@@ -734,7 +856,7 @@ func (m model) View() tea.View {
 		}
 		footer += " " + st.Render(" "+b+" ")
 	}
-	footer += "  " + buttonStyle.Render(map[bool]string{false: " Commit & Push ", true: " Pushing… "}[m.pushing]) + "  " + buttonStyle.Render(" Open PR ")
+	footer += "  " + buttonStyle.Render(map[bool]string{false: " Commit & Push ", true: " Pushing… "}[m.pushing]) + "  " + buttonStyle.Render(" Open PR ") + "  " + buttonStyle.Render(" Restore ")
 	footer += fmt.Sprintf("  %d files  +%d -%d", len(m.files), add, del)
 	if m.err != nil {
 		footer += "  │ " + errStyle.Render(m.err.Error())
@@ -748,21 +870,8 @@ func (m model) View() tea.View {
 		dimStyle.Render(strings.Repeat("│\n", h-1)+"│"),
 		lipgloss.NewStyle().Width(diffW).Height(h).Render(strings.Join(diff, "\n")),
 	)
-	if m.editing {
-		btn, hint := " Commit ", "  → commit all changes & push"
-		if !m.commit {
-			k := m.target.key()
-			t := thread.Thread{File: path(m.target.file), Side: k.side, Line: k.line}
-			if i := slices.IndexFunc(m.threads, func(t thread.Thread) bool { return t.ID == m.replyTo }); i >= 0 {
-				t = m.threads[i]
-			}
-			side := map[string]string{"old": "L", "new": "R"}[t.Side] // GitHub's left/right line notation
-			btn, hint = " Comment ", fmt.Sprintf("  → %s %s%d", t.File, side, t.Line)
-		}
-		if v.Cursor = m.input.Cursor(); v.Cursor != nil {
-			v.Cursor.Y += h // the textarea starts right below the body
-		}
-		view += "\n" + m.input.View() + "\n" + buttonStyle.Render(btn) + "  " + cancelStyle.Render(" Cancel ") + dimStyle.Render(hint)
+	if m.commit {
+		view += "\n" + strings.Join(box, "\n")
 	}
 	v.Content = view + "\n" + lipgloss.NewStyle().Inline(true).MaxWidth(m.width).Render(footer)
 	return v

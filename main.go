@@ -33,8 +33,12 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	sock, err := thread.SocketPath(repo.GitDir)
+	if err != nil {
+		return err
+	}
 	if len(os.Args) > 1 && os.Args[1] == "mcp" {
-		return mcp.Serve(context.Background(), thread.SocketPath(repo.GitDir), repo.Slug())
+		return mcp.Serve(context.Background(), sock, repo.Slug())
 	}
 
 	baseFlag := flag.String("base", "", "base ref to diff against (default: config, then origin/HEAD, main, master)")
@@ -49,5 +53,5 @@ func run() error {
 	if base == "" {
 		base = repo.DefaultBase()
 	}
-	return tui.Run(repo, slug, rc, base)
+	return tui.Run(repo, sock, slug, rc, base)
 }

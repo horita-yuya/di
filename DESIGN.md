@@ -62,6 +62,7 @@ repos:
 ## internal/thread
 
 コメントはスレッド (ユーザー ⇄ Claude の往復)。**永続化しない。TUI プロセスのメモリ上にのみ持つ** (di を閉じたら消える)。
+di 再起動後は footer の `Restore` で、会話を覚えている Claude に `restore_comments` で送り返してもらう。
 
 ```go
 type Message struct {
@@ -69,7 +70,7 @@ type Message struct {
     Body   string
 }
 type Thread struct {
-    ID       string    // 連番で十分
+    ID       string    // 連番。初期値は起動時の Unix 秒 (前回 run から復元したスレッドと衝突させない)
     File     string    // new path (削除ファイルなら old path)
     Side     string    // "new" | "old"
     Line     int       // その side での行番号
@@ -85,14 +86,17 @@ type Thread struct {
 `di mcp` は Claude Code が spawn する別プロセス (channels は stdio 必須) なので、TUI と unix socket で繋ぐ。
 `di mcp` は状態を持たない中継役 (list_comments 用に受け取ったスレッドのキャッシュのみ)。
 
-- Socket: `filepath.Join(os.TempDir(), "di-"+hex(sha256(GitDir))[:12]+".sock")`
+- Socket: `/tmp/di-<uid>/<hex(sha256(GitDir))[:12]>.sock`。`/tmp/di-<uid>` は 0700 で、Lstat (symlink 拒否) + Chmod (所有者しか成功しない) で
+  自分の所有と確認できなければエラー終了 (他ユーザーによる socket の乗っ取り / 接続を防ぐ)
   (GitDir = `git rev-parse --absolute-git-dir` は worktree ごとに別 ⇒ **worktree ごとに独立**。
   sun_path 長制限 (macOS 104B) を避けるため GitDir 配下には置かない)
 - TUI が listen。起動時に dial して繋がれば「この worktree で di は起動済み」でエラー終了、繋がらなければ stale socket を消して listen。終了時に削除。
-- プロトコル: 双方向 newline-delimited JSON (`json.Encoder`/`json.Decoder`)
-  - TUI → mcp: `Thread` 全体。ユーザーが新規コメント / 返信した時に接続中の全 mcp へ broadcast。
-    mcp が接続した時は「最後が user」のスレッドを全部送る。
-  - mcp → TUI: `{"id", "body"}` (Claude の返信)。TUI はメッセージ追加して再描画 (`p.Send`)。
+- プロトコル: 双方向 newline-delimited JSON (`json.Encoder`/`json.Decoder`)。各行は envelope
+  - TUI → mcp: `ToMCP{thread?, resolved?, restore?}` を接続中の全 mcp へ broadcast
+    - `thread`: ユーザーが新規コメント / 返信した時のスレッド全体。mcp が接続した時は「最後が user」のスレッドを全部送る。
+    - `resolved`: Resolve したスレッド ID。`restore`: footer の `Restore` (Claude に復元を依頼)。
+  - mcp → TUI: `ToTUI{reply?, restore?}`。`reply` は `{"id", "body"}` (Claude の返信) でメッセージ追加。
+    `restore` はスレッド配列で、ID が未登録 (冪等) かつメッセージのあるものを追加し、seq を各 ID 以上に上げる。
 - `di mcp` は TUI 未起動なら 1 秒間隔で再接続を試み続ける (Claude を先に起動しても良い)。
 
 ## Hot reload
@@ -113,6 +117,8 @@ git 実行は tea.Cmd 内 (goroutine) で行い UI をブロックしない。
 - ファイル行にも `▾/▸` を表示し、クリックで fold 状態をトグル (行の他の部分はジャンプ)。
 - diff 側カーソルのファイルをツリーでハイライト (同期)。
 - Claude の返信に未回答のスレッドがあるファイル (と、それを含む閉じたディレクトリ) をスレッドと同じ黄色でハイライト。
+- ツリー下部に Claude replies パネル (最大で左ペインの半分): 最後の発言が Claude のスレッドを `Resolve` ボタン + `file L/R行` + 返信の 1 行目で列挙。
+  `Resolve` でスレッドを削除 (メモリ上のみ、diff からも消える) して mcp に `resolved` を送る、他の部分のクリックでそのスレッドへジャンプ。
 
 ### Diff
 - 平坦な row 配列 (file header / hunk header / code line / comment) を自前でスクロール描画する (viewport 不要)。
@@ -120,11 +126,14 @@ git 実行は tea.Cmd 内 (goroutine) で行い UI をブロックしない。
 - code line: `old行番号 new行番号 ±内容`、追加=緑, 削除=赤。横はみ出しは切り詰め。
 - config で collapsed なファイルはデフォルトで `▶`。ユーザーは開ける。
 - 操作はマウスのみ (キーは `ctrl+c` 終了だけ)。ホイールでポインタ下のペインをスクロール、ファイルヘッダのクリックで開閉、
-  コード行のクリックでコメント入力 (ホバー行の gutter に `+` を表示、入力中のクリックは書きかけのまま対象を切替) (画面下部の bubbles/textarea + `Comment` / `Cancel` ボタン)。
+  コード行のクリックでコメント入力 (ホバー行の gutter に `+` を表示、入力中のクリックは書きかけのまま対象を切替)。
+  bubbles/textarea + `Comment` / `Cancel` ボタンの box は diff ペイン内の対象行 (返信ならスレッドの `Comment` 行) の直下に inline で描画する。
+  `screen()` が diff ペインの各行 → row index (box の行は -1) を返し、描画とマウス判定の両方で使う。開いた時だけ box が見えるようにスクロールする。
 - スレッドは対象行の直下に表示: `💬 [status]` + メッセージを `you: ...` / `claude: ...` で時系列表示。
 - スレッド末尾の `Comment` ボタンでスレッドにコメントを追加 (送信で Claude に push)。
   対象 (Side, Line) の行内容が LineText と一致しなければ outdated 扱いで file header 直下に表示。
-- footer: `<branch> ← <base>  N files  +A -D  │ keys hint`
+- footer: `<status> <branch> ← [bases]  Commit & Push  Open PR  Restore  N files  +A -D`。
+  Commit & Push のメッセージ入力は従来通り画面下部の box。`Restore` は接続中の mcp に `restore` を送る (未接続ならエラー表示)。
 
 ## MCP (`di mcp`)
 
@@ -143,6 +152,9 @@ go-sdk の stdio サーバー。cwd の repo を対象とする。
   - `list_comments` — キャッシュ中のスレッドを content と同形式で返す。channels を使わない場合のフォールバック
     (「di のコメントに対応して」と頼めば動く)。
   - `reply_comment {id, body}` — socket 経由で TUI に返信を送る。TUI 未接続ならエラーを返す。
+  - `restore_comments {threads}` — スレッド (元の id, file, side, line, line_text, context, 全履歴) を TUI に送り、キャッシュに upsert。TUI 未接続ならエラー。
+- TUI からの `resolved` はキャッシュから削除し「対応不要」と channel で通知 (meta `{"thread_id"}`)。
+  `restore` は「この会話の未 resolve で list_comments に無いスレッドを restore_comments で送れ」と channel で通知 (meta `{"kind": "restore"}`)。
 
 ### Claude Code 側のセットアップ (README に記載)
 ```

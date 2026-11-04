@@ -24,7 +24,7 @@ di upgrade          # replace this binary with the latest release
 ```
 
 The diff runs from the merge-base with base to the working tree (including uncommitted and untracked files) and refreshes every second.
-Comment threads live only inside the di process and are gone when di exits. You can run one di per worktree.
+Comment threads live only inside the di process and are gone when di exits; after a restart, the footer's `Restore` button asks Claude to send them back from its conversation. You can run one di per worktree.
 
 Light theme only. While running, di switches the terminal background to white (OSC 10/11) and restores it on exit (OSC 110/111).
 
@@ -45,12 +45,14 @@ Mouse driven (the keyboard only does `↑` / `↓` and `ctrl+c` to quit).
 | Click a file header | Fold / unfold the file |
 | Click a code line | Comment on that line (while typing, switches the target line and keeps the draft) |
 | `Comment` at the end of a thread | Add a comment to the thread |
-| `Comment` / `Cancel` under the input | Send / discard (`enter` also sends; newline with `alt+enter` or `ctrl+j`) |
+| `Resolve` in Claude replies (under the tree) | Delete the thread and tell Claude; click the rest of the entry to jump to it |
+| `Comment` / `Cancel` under the input (opens right below the line) | Send / discard (`enter` also sends; newline with `alt+enter` or `ctrl+j`) |
 | Base button in the footer | Diff against that base |
 | `Commit & Push` in the footer | Commit all changes and push |
 | `Open PR` in the footer | Open the branch's pull request (or the create page) in the browser |
+| `Restore` in the footer | Ask Claude to restore the unresolved threads after di restarted |
 
-Thread comments wrap to the width of the diff pane. Files with an unanswered Claude reply (and closed folders containing them) are highlighted in the tree.
+Thread comments wrap to the width of the diff pane. Files with an unanswered Claude reply (and closed folders containing them) are highlighted in the tree, and listed in the Claude replies panel below it (in memory only).
 
 ## Config
 
@@ -76,6 +78,7 @@ claude --dangerously-load-development-channels server:di
 The 2026-07-28 protocol revision does not register the channel, so `di mcp` only accepts earlier revisions.
 
 Comments you send from di reach Claude as channel notifications, and Claude replies with `reply_comment`.
+Resolving a thread tells Claude it is done; `Restore` asks Claude to push the threads it remembers back with `restore_comments`.
 Ask Claude something like "fold the generated code" and it updates `collapsed` in the config via `get_collapsed` / `set_collapsed`, applied immediately to the running di
 (the config is rewritten, so YAML comments are lost; this is unavailable in repositories without an origin remote).
 

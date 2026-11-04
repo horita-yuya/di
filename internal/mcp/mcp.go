@@ -76,13 +76,33 @@ func Serve(ctx context.Context, sock, slug string) error {
 		if r.tui == nil {
 			return nil, nil, errors.New("di is not running")
 		}
-		if err := json.NewEncoder(r.tui).Encode(in); err != nil {
+		if err := json.NewEncoder(r.tui).Encode(thread.ToTUI{Reply: &in}); err != nil {
 			return nil, nil, err
 		}
 		if i := slices.IndexFunc(r.threads, func(t thread.Thread) bool { return t.ID == in.ID }); i >= 0 {
 			r.threads[i].Messages = append(r.threads[i].Messages, thread.Message{Author: "claude", Body: in.Body})
 		}
 		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "sent"}}}, nil, nil
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name:        "restore_comments",
+		Description: "Restore di review threads into di after it restarted, when di asks for it.",
+	}, func(_ context.Context, _ *mcp.CallToolRequest, in struct {
+		Threads []thread.Thread `json:"threads"`
+	}) (*mcp.CallToolResult, any, error) {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if r.tui == nil {
+			return nil, nil, errors.New("di is not running")
+		}
+		if err := json.NewEncoder(r.tui).Encode(thread.ToTUI{Restore: in.Threads}); err != nil {
+			return nil, nil, err
+		}
+		for _, t := range in.Threads {
+			r.upsert(t)
+		}
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("restored %d", len(in.Threads))}}}, nil, nil
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -120,7 +140,7 @@ func Serve(ctx context.Context, sock, slug string) error {
 	return s.Run(ctx, &transport{onConnect: func(c mcp.Connection) { go r.run(ctx, sock, c) }})
 }
 
-// run keeps (re)connecting to the TUI and pushes every received thread to Claude as a channel notification.
+// run keeps (re)connecting to the TUI and pushes everything it sends to Claude as channel notifications.
 func (r *relay) run(ctx context.Context, sock string, out mcp.Connection) {
 	for ; ; time.Sleep(time.Second) {
 		c, err := net.Dial("unix", sock)
@@ -132,21 +152,30 @@ func (r *relay) run(ctx context.Context, sock string, out mcp.Connection) {
 		r.mu.Unlock()
 
 		for dec := json.NewDecoder(c); ; {
-			var t thread.Thread
-			if err := dec.Decode(&t); err != nil {
+			var in thread.ToMCP
+			if err := dec.Decode(&in); err != nil {
 				break
 			}
+			var content string
+			var meta map[string]string
 			r.mu.Lock()
-			if i := slices.IndexFunc(r.threads, func(c thread.Thread) bool { return c.ID == t.ID }); i >= 0 {
-				r.threads[i] = t
-			} else {
-				r.threads = append(r.threads, t)
+			switch {
+			case in.Thread != nil:
+				t := *in.Thread
+				r.upsert(t)
+				content, meta = format(t), map[string]string{"thread_id": t.ID, "file": t.File, "line": fmt.Sprint(t.Line)}
+			case in.Resolved != "":
+				r.threads = slices.DeleteFunc(r.threads, func(t thread.Thread) bool { return t.ID == in.Resolved })
+				content = fmt.Sprintf("The user resolved di review thread %s. Nothing more is needed for it.", in.Resolved)
+				meta = map[string]string{"thread_id": in.Resolved}
+			case in.Restore:
+				content = "The user restarted di and asked to restore its review threads. Call restore_comments with every di review thread " +
+					"from this conversation that the user has not resolved and that is not already in list_comments. " +
+					"Give each thread its original id, file, side, line, line_text, context and full message history (user and claude), in order."
+				meta = map[string]string{"kind": "restore"}
 			}
 			r.mu.Unlock()
-			params, err := json.Marshal(map[string]any{
-				"content": format(t),
-				"meta":    map[string]string{"thread_id": t.ID, "file": t.File, "line": fmt.Sprint(t.Line)},
-			})
+			params, err := json.Marshal(map[string]any{"content": content, "meta": meta})
 			if err == nil {
 				err = out.Write(ctx, &jsonrpc.Request{Method: "notifications/claude/channel", Params: params})
 			}
@@ -160,6 +189,15 @@ func (r *relay) run(ctx context.Context, sock string, out mcp.Connection) {
 		r.tui, r.threads = nil, nil
 		r.mu.Unlock()
 		c.Close()
+	}
+}
+
+// upsert caches t for list_comments. r.mu must be held.
+func (r *relay) upsert(t thread.Thread) {
+	if i := slices.IndexFunc(r.threads, func(c thread.Thread) bool { return c.ID == t.ID }); i >= 0 {
+		r.threads[i] = t
+	} else {
+		r.threads = append(r.threads, t)
 	}
 }
 
