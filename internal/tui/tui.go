@@ -434,9 +434,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		case tea.MouseWheelMsg:
 			m.sel = selection{} // the text under it moves
-			d := 3
+			// A line per event: the terminal already sends several per wheel notch (Ghostty 3) and one per
+			// line of trackpad travel, so more would make trackpad scrolling jump.
+			d := 1
 			if mouse.Button == tea.MouseWheelUp {
-				d = -3
+				d = -1
 			}
 			switch {
 			case mouse.X < m.width*3/10:
@@ -469,6 +471,13 @@ func (m *model) click(x, y int) tea.Cmd {
 			}
 		}
 		return nil
+	}
+	// A click outside the open Message AI section takes the keys back from its input, so the arrows move
+	// between files again; the draft stays for when the section is clicked.
+	if m.direct && (x < m.width*3/10 || y < m.diffHeight()) {
+		m.editing, m.direct = false, false
+		m.input.Blur()
+		m.scroll()
 	}
 	if u := m.urlAt(x, y); u != "" {
 		return func() tea.Msg { return openedMsg{m.worktree, openURL(u)} }

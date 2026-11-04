@@ -356,6 +356,19 @@ func TestMessageAI(t *testing.T) {
 	if m = click(m, diffX+20, m.diffHeight()+2); !m.direct || !m.input.Focused() {
 		t.Fatal("click in the conversation did not bring the input back")
 	}
+	// A click in the file tree takes the keys back from the input, keeping the draft, so the arrows move between files.
+	m.input.SetValue("draft")
+	m = click(m, 5, 0)
+	if m.direct || m.editing || m.input.Focused() || m.input.Value() != "draft" || !m.chatOpen {
+		t.Fatalf("direct=%v editing=%v focused=%v value=%q", m.direct, m.editing, m.input.Focused(), m.input.Value())
+	}
+	if m = update(m, tea.KeyPressMsg{Code: 'x', Text: "x"}); m.input.Value() != "draft" {
+		t.Fatalf("a key went to the input: %q", m.input.Value())
+	}
+	if m = click(m, diffX+20, m.diffHeight()+2); !m.direct || !m.input.Focused() || m.input.Value() != "draft" {
+		t.Fatal("click in the section did not bring the draft back")
+	}
+	m.input.Reset()
 	// Without Claude the draft stays.
 	m.peers = nil
 	m.input.SetValue("hello")
@@ -445,5 +458,18 @@ func TestURLAt(t *testing.T) {
 	}
 	if got := links(lipgloss.NewStyle(), "see https://x.y/z."); got != "see "+lipgloss.NewStyle().Foreground(linkColor).Underline(true).Render("https://x.y/z")+"." {
 		t.Fatalf("links = %q", got)
+	}
+}
+
+// TestWheelScrollsALine checks the diff moves a line per wheel event, which the terminal sends per line of trackpad travel.
+func TestWheelScrollsALine(t *testing.T) {
+	m, _ := newModel(t)
+	m = update(m, tea.WindowSizeMsg{Width: 100, Height: 5})
+	x := m.width*3/10 + 5
+	if m = update(m, tea.MouseWheelMsg{X: x, Y: 0, Button: tea.MouseWheelDown}); m.offset != 1 {
+		t.Fatalf("down: offset %d", m.offset)
+	}
+	if m = update(m, tea.MouseWheelMsg{X: x, Y: 0, Button: tea.MouseWheelUp}); m.offset != 0 {
+		t.Fatalf("up: offset %d", m.offset)
 	}
 }
