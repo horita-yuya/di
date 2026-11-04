@@ -152,6 +152,13 @@ git 実行は tea.Cmd 内 (goroutine) で行い UI をブロックしない。
 - 送信で `chat` に追加して接続中の mcp に `message` を送る。textarea は開いたまま (続けて送れる)。未接続ならエラー表示で下書きは残す。
 - Claude は予約 ID `message` で `reply_comment` / `set_status` する。Restore でも ID `message` のスレッドとして返ってくれば (chat が空なら) 会話を戻す。
 
+### Show File
+- Claude が `show_file` で送ったファイル (diff の有無を問わない) を diff と Message AI の間に出す。worktree ごとに 1 つ (`shown`)、次の `show_file` で置き換え。
+  常設のセクションは無く、出ていない時は高さ 0。出ている時は Message AI が残す高さの半分。
+- 1 行目は `Close` ボタン + file header と同じグレーの `path[:line]`。以下 `%5d ` の行番号 + 内容 (tab は空白 4、横はみ出しは切り詰め)、
+  `line` の行は cursor 色。開いた時は `line` の 3 行上から。ホイールでスクロール。`Close` で消す。
+- TUI がファイルを読む (最大 4MB、NUL を含めば binary としてエラー表示)。hot reload の tick ごとに読み直す。
+
 ### Diff
 - 平坦な row 配列 (file header / hunk header / code line / comment) を自前でスクロール描画する (viewport 不要)。
 - file header: `▼ path  +N -M` / collapsed は `▶ path` のみ。rename は `old → new`、binary は "Binary file"。ファイル境界が分かるようグレー背景 (`#6e7781`) に白太字。
@@ -167,7 +174,7 @@ git 実行は tea.Cmd 内 (goroutine) で行い UI をブロックしない。
 ホイールでポインタ下のペインをスクロール、ファイルヘッダのクリックで開閉、
   コード行のクリックでコメント入力 (ホバー行の gutter に `+` を表示、入力中のクリックは書きかけのまま対象を切替)。
   bubbles/textarea + `Comment` / `Cancel` ボタンの box は diff ペイン内の対象行 (返信ならスレッドの `Comment` 行) の直下に inline で描画し、コード本文の開始位置 (gutter 2 + 行番号 10 = 12 桁目) に揃える。
-  `screen()` が diff ペインの各行 → row index (box の行は -1) を返し、描画とマウス判定の両方で使う。開いた時だけ box が見えるようにスクロールする。
+  `screen()` が diff ペインの各行 → row index (box の行は -1) を返し、描画とマウス判定の両方で使う。クリックした行は動かさず、box はその下に開いて下の行を押し下げる (スクロールしない)。
 - スレッドは対象行の直下に表示: `💬 [status]` + メッセージを `you: ...` / `claude: ...` で時系列表示。
   Claude の作業中は `💬 [AI: <set_status の text>…]` (printable 化し改行は空白にして 1 行)。
 - スレッド末尾の `Comment` ボタンでスレッドにコメントを追加 (送信で Claude に push)。
@@ -200,6 +207,8 @@ go-sdk の stdio サーバー。cwd の repo を対象とする。
     (「di のコメントに対応して」と頼めば動く)。
   - `reply_comment {id, body}` — socket 経由で TUI に返信を送る。TUI 未接続ならエラーを返す。
   - `set_status {id, text}` — 作業中の進捗メモを TUI に送る (キャッシュしない)。TUI 未接続ならエラー。
+  - `show_file {path, line?}` — path (repo root からの相対 or 絶対) が通常ファイルか確認し、root 内なら相対パスにして TUI に送る。
+    無い / ディレクトリ / TUI 未接続ならエラー。Instructions にも「ユーザーがファイルを見たいと言ったら show_file」を足す。
   - `restore_comments {threads}` — スレッド (元の id, file, side, line, line_text, context, 全履歴) を TUI に送り、キャッシュに upsert。TUI 未接続ならエラー。
 - TUI からの `resolved` はキャッシュから削除し「対応不要」と channel で通知 (meta `{"thread_id"}`)。
   `restore` は「この会話の未 resolve で list_comments に無いスレッドを restore_comments で送れ (無ければ空配列)」と channel で通知 (meta `{"kind": "restore"}`)。

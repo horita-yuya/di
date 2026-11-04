@@ -44,7 +44,7 @@ Mouse driven (the keyboard only does `↑` / `↓` and `ctrl+c` to quit).
 | Click in the tree | Open / close a directory, or jump to a file (its arrow folds / unfolds the file) |
 | `↑` / `↓` | Jump to the previous / next file in the tree |
 | Click a file header | Fold / unfold the file |
-| Click a code line | Comment on that line (while typing, switches the target line and keeps the draft) |
+| Click a code line | Comment on that line: the box opens below it, the line stays put (while typing, switches the target line and keeps the draft) |
 | `Comment` at the end of a thread | Add a comment to the thread |
 | `Resolve` in AI Replies (under the tree) | Delete the thread and tell Claude; click the rest of the entry to jump to it |
 | `Comment` / `Cancel` under the input (opens right below the line, aligned with the code text) | Send / discard (`enter` also sends; newline with `alt+enter` or `ctrl+j`) |
@@ -54,6 +54,7 @@ Mouse driven (the keyboard only does `↑` / `↓` and `ctrl+c` to quit).
 | `Restore` in AI Replies (shown when it is empty) | Ask Claude to restore the unresolved threads after di restarted (the note after it shows the request, then how many threads came back) |
 | `Message AI` bar (bottom of the diff pane) | Open / close a conversation with Claude that is not about any file or line: it takes the lower half of the diff pane, and Claude answers there (`Send` or `enter`; a click anywhere in it brings the input back, e.g. after commenting on a line). Closed, the bar shows Claude's progress and `● Claude replied` |
 | Drag | Select text within a pane and copy it to the clipboard (OSC 52; from inside code text it leaves out the line numbers). A press and release without moving is a click |
+| `Close` on a shown file | Remove the file Claude showed under the diff (ask Claude "show me this file" to show any file, changed or not) |
 | Click a URL | Open it in the browser (a URL wrapped in a thread opens in full) |
 
 Thread comments wrap to the width of the diff pane. Files with an unanswered Claude reply (and closed folders containing them) are highlighted in the tree, and listed in the AI Replies panel below it (in memory only), which is always shown and holds the `Restore` button while empty.
@@ -84,6 +85,7 @@ The 2026-07-28 protocol revision does not register the channel, so `di mcp` only
 Comments you send from di reach Claude as channel notifications, and AI Replies with `reply_comment`.
 While Claude works on a thread it reports progress with `set_status`, shown in the thread header as `💬 [AI: editing…]` until it replies.
 Resolving a thread tells Claude it is done; `Restore` asks Claude to push the threads it remembers back with `restore_comments`.
+Ask Claude "show me internal/tui/tui.go" (in Message AI or its terminal) and it calls `show_file`: di shows the file under the diff, changed or not, scrolled to a line if given.
 Ask Claude something like "fold the generated code" and it updates `collapsed` in the config via `get_collapsed` / `set_collapsed`, applied immediately to the running di
 (the config is rewritten, so YAML comments are lost; this is unavailable in repositories without an origin remote).
 

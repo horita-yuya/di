@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -23,7 +25,8 @@ import (
 const instructions = `Messages arriving as <channel source="di"> are review comment threads the user wrote in di (a terminal diff reviewer). ` +
 	`After handling one (fixing code or answering a question), always answer with reply_comment. ` +
 	`Ask the user questions or confirmations via reply_comment as well; they read and reply in di. ` +
-	`As soon as you start on a di thread, call set_status with a few words, call it again at each step (reading, editing, testing), and finish with reply_comment.`
+	`As soon as you start on a di thread, call set_status with a few words, call it again at each step (reading, editing, testing), and finish with reply_comment. ` +
+	`When the user asks to see a file (e.g. "show me this file", in di's Message AI or here), call show_file: di shows it under the diff, even without changes.`
 
 // transport captures the stdio connection so the relay can send notifications go-sdk does not know about.
 type transport struct{ onConnect func(mcp.Connection) }
@@ -42,7 +45,8 @@ type relay struct {
 	threads []thread.Thread // received from the TUI, for list_comments
 }
 
-func Serve(ctx context.Context, sock, slug string) error {
+// Serve serves Claude Code on stdio for the worktree at root, relaying to the TUI on sock.
+func Serve(ctx context.Context, sock, slug, root string) error {
 	r := &relay{}
 	s := mcp.NewServer(&mcp.Implementation{Name: "di", Version: "0.1.0"}, &mcp.ServerOptions{
 		Instructions: instructions,
@@ -99,6 +103,39 @@ func Serve(ctx context.Context, sock, slug string) error {
 			return nil, nil, err
 		}
 		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "shown"}}}, nil, nil
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "show_file",
+		Description: "Show a file in di, under the diff, whether or not it has changes, e.g. when the user asks to see a file. " +
+			"Optionally scroll to and highlight a line. It replaces the file shown before; the user closes it in di.",
+	}, func(_ context.Context, _ *mcp.CallToolRequest, in thread.Show) (*mcp.CallToolResult, any, error) {
+		abs := in.Path
+		if !filepath.IsAbs(abs) {
+			abs = filepath.Join(root, abs)
+		}
+		fi, err := os.Stat(abs)
+		if err != nil {
+			return nil, nil, err
+		}
+		if fi.IsDir() {
+			return nil, nil, fmt.Errorf("%s is a directory", in.Path)
+		}
+		// Inside the worktree it is shown relative to its root, as in the diff.
+		if rel, err := filepath.Rel(root, abs); err == nil && rel != ".." && !strings.HasPrefix(rel, "../") {
+			in.Path = rel
+		} else {
+			in.Path = abs
+		}
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if r.tui == nil {
+			return nil, nil, errors.New("di is not running")
+		}
+		if err := json.NewEncoder(r.tui).Encode(thread.ToTUI{Show: &in}); err != nil {
+			return nil, nil, err
+		}
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "shown " + in.Path}}}, nil, nil
 	})
 
 	mcp.AddTool(s, &mcp.Tool{

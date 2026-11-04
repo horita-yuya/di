@@ -38,7 +38,7 @@ func run() error {
 		if err != nil {
 			return err
 		}
-		return mcp.Serve(context.Background(), sock, repo.Slug())
+		return mcp.Serve(context.Background(), sock, repo.Slug(), repo.Root)
 	}
 
 	baseFlag := flag.String("base", "", "base ref to diff against (default: config, then origin/HEAD, main, master)")

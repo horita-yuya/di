@@ -3,10 +3,12 @@
 package tui
 
 import (
+	"bytes"
 	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -165,8 +167,46 @@ type worktree struct {
 	offset, treeOffset int    // first visible row / tree node
 	current            string // file highlighted in the tree
 
+	shown *shownFile // the file Claude showed under the diff with show_file, nil when none
+
 	pushing bool
 	pushErr error // Commit & Push / Open PR error, kept apart from err, which every reload overwrites
+}
+
+// shownFile is a file shown under the diff, changed or not.
+type shownFile struct {
+	path   string // relative to the worktree root, or absolute
+	line   int    // highlighted line, 0 for none
+	lines  []string
+	err    error
+	offset int // first visible line
+}
+
+// maxShown is how much of a shown file di reads.
+const maxShown = 4 << 20
+
+// readShown reads the file at p, relative to root unless absolute, as lines.
+func readShown(root, p string) ([]string, error) {
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(root, p)
+	}
+	f, err := os.Open(p)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, maxShown))
+	if err != nil {
+		return nil, err
+	}
+	if bytes.IndexByte(data, 0) >= 0 {
+		return nil, errors.New("binary file")
+	}
+	lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	for i, l := range lines {
+		lines[i] = strings.TrimSuffix(l, "\r")
+	}
+	return lines, nil
 }
 
 type model struct {
@@ -298,6 +338,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil // stale load; also ends its tick chain
 		}
 		next := tea.Tick(time.Second, func(time.Time) tea.Msg { return m.load() })
+		if f := m.shown; f != nil && m.repo != nil { // follows edits, as the diff does
+			f.lines, f.err = readShown(m.repo.Root, f.path)
+			m.scroll()
+		}
 		m.branch, m.err = cmp.Or(msg.branch, m.branch), msg.err
 		cfgChanged := !slices.Equal(msg.cfg.CollapsedGlobs, m.cfg.CollapsedGlobs)
 		if msg.err != nil || (!cfgChanged && msg.raw == m.raw && m.rows != nil) {
@@ -370,6 +414,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if added == 0 {
 				wt.restoreNote = " nothing to restore"
 			}
+		}
+		if s := msg.Show; s != nil {
+			var root string
+			if wt.repo != nil {
+				root = wt.repo.Root
+			}
+			lines, err := readShown(root, s.Path)
+			wt.shown = &shownFile{path: s.Path, line: s.Line, lines: lines, err: err, offset: s.Line - 4} // a few lines above it
 		}
 		if wt == m.worktree {
 			m.build()
@@ -448,8 +500,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch {
 			case mouse.X < m.width*3/10:
 				m.treeOffset += d
-			case mouse.Y >= m.diffHeight():
+			case mouse.Y >= m.chatTop():
 				m.chatScroll -= d
+			case mouse.Y >= m.diffHeight():
+				m.shown.offset += d
 			default:
 				m.offset += d
 			}
@@ -479,7 +533,7 @@ func (m *model) click(x, y int) tea.Cmd {
 	}
 	// A click outside the open Message AI section takes the keys back from its input, so the arrows move
 	// between files again; the draft stays for when the section is clicked.
-	if m.direct && (x < m.width*3/10 || y < m.diffHeight()) {
+	if m.direct && (x < m.width*3/10 || y < m.chatTop()) {
 		m.editing, m.direct = false, false
 		m.input.Blur()
 		m.scroll()
@@ -580,8 +634,13 @@ func (m *model) click(x, y int) tea.Cmd {
 			m.offset = i
 			m.scroll()
 		}
-	case y >= m.diffHeight() && y < h:
-		return m.clickChat(x-treeW-1, y-m.diffHeight())
+	case y == m.diffHeight() && y < m.chatTop(): // the shown file's title row, " Close " at x 0-6
+		if x-treeW-1 < 7 {
+			m.shown = nil
+			m.scroll()
+		}
+	case y >= m.chatTop() && y < h:
+		return m.clickChat(x-treeW-1, y-m.chatTop())
 	case y < len(scr) && scr[y] >= 0:
 		i := scr[y]
 		switch r := m.rows[i]; r.kind {
@@ -593,10 +652,7 @@ func (m *model) click(x, y int) tea.Cmd {
 			m.chatOpen = false // the comment needs the room; the conversation stays
 			m.input.Placeholder = "Leave a comment (enter: send, alt+enter: newline)"
 			m.input.SetWidth(m.diffWidth() - codeX)
-			// r is the anchor now: scroll the box below it into view.
-			if over := i - m.offset + 2 + lipgloss.Height(m.input.View()) - m.diffHeight(); over > 0 {
-				m.offset += over
-			}
+			// The line stays where it was clicked; the box opens below it, pushing the rows under it down.
 			m.scroll()
 			return m.input.Focus()
 		}
@@ -875,22 +931,67 @@ func (m *model) scroll() {
 	}
 	m.offset = max(0, min(m.offset, n-m.diffHeight()))
 	m.chatScroll = max(0, min(m.chatScroll, len(m.chatLog(m.diffWidth()))-m.chatLogHeight()))
+	if f := m.shown; f != nil {
+		f.offset = max(0, min(f.offset, len(f.lines)-(m.fileHeight()-1)))
+	}
 	m.treeOffset = max(0, min(m.treeOffset, len(m.tree)-m.treeHeight()))
 }
 
 func (m model) bodyHeight() int { return max(1, m.height-1) }
 
-// diffHeight is the diff's share of the right pane; the Message AI section under it takes the rest:
-// its title row, or about half the pane when open.
-func (m model) diffHeight() int {
+// The right pane is, from the top, the diff, the file Claude showed (if any) and the Message AI section.
+func (m model) diffHeight() int { return max(1, m.bodyHeight()-m.chatHeight()-m.fileHeight()) }
+
+// chatHeight is the Message AI section's: its title row, or about half the pane when open.
+func (m model) chatHeight() int {
 	ch := 1
 	if m.chatOpen {
 		ch = max(m.bodyHeight()/2, lipgloss.Height(m.input.View())+4)
 	}
-	return max(1, m.bodyHeight()-ch)
+	return max(0, min(ch, m.bodyHeight()-1))
 }
 
-func (m model) chatHeight() int { return m.bodyHeight() - m.diffHeight() }
+// fileHeight is the shown file's: half of what the Message AI section leaves, or 0 with none.
+func (m model) fileHeight() int {
+	if m.shown == nil {
+		return 0
+	}
+	rest := m.bodyHeight() - m.chatHeight()
+	return max(0, min(rest/2, rest-1))
+}
+
+// chatTop is the first line of the Message AI section.
+func (m model) chatTop() int { return m.diffHeight() + m.fileHeight() }
+
+// fileView renders the shown file as lines of width w: a title row with its path and " Close ", then its lines
+// numbered, the highlighted one in the cursor color.
+func (m model) fileView(w int) []string {
+	f, fh := m.shown, m.fileHeight()
+	if fh == 0 {
+		return nil
+	}
+	title := " " + printable(f.path)
+	if f.line > 0 {
+		title += fmt.Sprintf(":%d", f.line)
+	}
+	lines := []string{cancelStyle.Render(" Close ") + headerStyle.Inline(true).Width(max(0, w-7)).MaxWidth(max(0, w-7)).Render(title)}
+	if f.err != nil {
+		lines = append(lines, errStyle.Inline(true).MaxWidth(w).Render("  "+printable(f.err.Error())))
+	}
+	for i := f.offset; f.err == nil && i < len(f.lines) && len(lines) < fh; i++ {
+		num := fmt.Sprintf("%5d ", i+1)
+		tw := max(0, w-len(num))
+		text := ansi.Truncate(strings.ReplaceAll(printable(f.lines[i]), "\t", "    "), tw, "")
+		pad := strings.Repeat(" ", max(0, tw-ansi.StringWidth(text)))
+		if i+1 == f.line {
+			st := lipgloss.NewStyle().Background(cursorBg)
+			lines = append(lines, st.Render(num)+links(st, text+pad))
+		} else {
+			lines = append(lines, dimStyle.Render(num)+links(lipgloss.NewStyle(), text))
+		}
+	}
+	return fit(lines, fh)
+}
 
 // chatInput is the bottom of the open Message AI section: the textarea with the Send button under it,
 // or a row standing for it while the textarea is elsewhere.
@@ -1208,7 +1309,7 @@ func (m model) View() tea.View {
 	if len(m.rows) == 0 {
 		diff = append(diff, dimStyle.Render("no changes against "+m.base))
 	}
-	diff = append(fit(diff, dh), m.chatView(diffW)...)
+	diff = append(append(fit(diff, dh), m.fileView(diffW)...), m.chatView(diffW)...)
 
 	var add, del int
 	for _, f := range m.files {

@@ -37,6 +37,13 @@ type ToTUI struct {
 	Reply   *Reply   `json:"reply,omitempty"`
 	Restore []Thread `json:"restore"` // no omitempty: an empty restore_comments must still reach the TUI, as a non-nil slice
 	Status  *Status  `json:"status,omitempty"`
+	Show    *Show    `json:"show,omitempty"`
+}
+
+// Show asks di to show a file under the diff, whether or not it has changes.
+type Show struct {
+	Path string `json:"path" jsonschema:"file path, relative to the repository root or absolute"`
+	Line int    `json:"line,omitempty" jsonschema:"optional line number to scroll to and highlight"`
 }
 
 // Reply is Claude's answer to a thread.

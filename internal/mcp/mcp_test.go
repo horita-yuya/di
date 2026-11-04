@@ -53,7 +53,7 @@ func (c tapConn) Read(ctx context.Context) (jsonrpc.Message, error) {
 }
 
 // serve runs Serve on swapped stdio pipes and returns a client session connected to it, with the channel
-// notifications it pushes. sock is where the relay looks for the TUI.
+// notifications it pushes. sock is where the relay looks for the TUI; its directory is the worktree root.
 func serve(t *testing.T, sock, slug string) (*mcp.ClientSession, <-chan channel) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	inR, inW, err := os.Pipe()
@@ -68,7 +68,8 @@ func serve(t *testing.T, sock, slug string) (*mcp.ClientSession, <-chan channel)
 	os.Stdin, os.Stdout = inR, outW
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { Serve(ctx, sock, slug); close(done) }()
+	root := filepath.Dir(sock) // the worktree root, where show_file looks
+	go func() { Serve(ctx, sock, slug, root); close(done) }()
 	t.Cleanup(func() {
 		cancel()
 		<-done // Serve no longer touches os.Stdin/os.Stdout
@@ -232,6 +233,24 @@ func TestRelay(t *testing.T) {
 	n = recv(t, notes)
 	if !equalMeta(n.Meta, map[string]string{"kind": "message"}) || !strings.HasSuffix(n.Content, "\n\nhow is it going?") {
 		t.Fatalf("notification %+v", n)
+	}
+
+	// show_file checks the file and sends its path relative to the root to the TUI.
+	os.MkdirAll(filepath.Join(filepath.Dir(sock), "pkg"), 0o755)
+	os.WriteFile(filepath.Join(filepath.Dir(sock), "pkg", "x.go"), []byte("package pkg\n"), 0o644)
+	for _, p := range []string{"pkg/x.go", filepath.Join(filepath.Dir(sock), "pkg", "x.go")} {
+		if got, isErr := call(t, cs, "show_file", thread.Show{Path: p, Line: 1}); isErr || got != "shown pkg/x.go" {
+			t.Fatalf("show_file(%s): %s", p, got)
+		}
+		in = thread.ToTUI{}
+		if err := dec.Decode(&in); err != nil || in.Show == nil || *in.Show != (thread.Show{Path: "pkg/x.go", Line: 1}) {
+			t.Fatalf("TUI got %+v, %v", in, err)
+		}
+	}
+	for _, p := range []string{"missing.go", "pkg"} {
+		if got, isErr := call(t, cs, "show_file", thread.Show{Path: p}); !isErr {
+			t.Fatalf("show_file(%s) = %s, want an error", p, got)
+		}
 	}
 
 	// When the TUI exits, its threads are gone and replies fail.

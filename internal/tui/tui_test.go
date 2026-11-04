@@ -2,7 +2,10 @@ package tui
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -477,5 +480,53 @@ func TestWheelScrollsALine(t *testing.T) {
 	}
 	if m = update(m, tea.MouseWheelMsg{X: x, Y: 0, Button: tea.MouseWheelUp}); m.offset != 0 {
 		t.Fatalf("up: offset %d", m.offset)
+	}
+}
+
+func TestShowFile(t *testing.T) {
+	m, _ := newModel(t)
+	p := filepath.Join(t.TempDir(), "x.go")
+	var src strings.Builder
+	for i := 1; i <= 40; i++ {
+		fmt.Fprintf(&src, "line %d\n", i)
+	}
+	os.WriteFile(p, []byte(src.String()), 0o644)
+	dh := m.diffHeight()
+	m = update(m, peerData{m.worktree, thread.ToTUI{Show: &thread.Show{Path: p, Line: 20}}})
+	fh := m.fileHeight()
+	if fh == 0 || m.diffHeight()+fh != dh || m.chatTop() != dh {
+		t.Fatalf("diff %d + file %d, was %d", m.diffHeight(), fh, dh)
+	}
+	lines := strings.Split(ansi.Strip(m.View().Content), "\n")
+	x := m.width*3/10 + 1
+	if l := ansi.Cut(lines[m.diffHeight()], x, m.width); !strings.Contains(l, "Close") || !strings.Contains(l, " /") {
+		t.Fatalf("title %q", l)
+	}
+	if l := ansi.Cut(lines[m.diffHeight()+1], x, m.width); !strings.Contains(l, "17 line 17") {
+		t.Fatalf("first line %q, want a few lines above 20", l)
+	}
+
+	// The wheel scrolls it, and Close removes it.
+	m = update(m, tea.MouseWheelMsg{X: x + 5, Y: m.diffHeight() + 2, Button: tea.MouseWheelDown})
+	if m.shown.offset != 17 {
+		t.Fatalf("offset %d", m.shown.offset)
+	}
+	if m = click(m, x+2, m.diffHeight()); m.shown != nil || m.diffHeight() != dh {
+		t.Fatalf("not closed: %v", m.shown)
+	}
+
+	m = update(m, peerData{m.worktree, thread.ToTUI{Show: &thread.Show{Path: p + ".missing"}}})
+	if m.shown.err == nil || !strings.Contains(ansi.Strip(m.fileView(m.diffWidth())[1]), "open ") {
+		t.Fatalf("missing file: %v", m.shown.err)
+	}
+}
+
+func TestCommentBoxOpensBelowTheLine(t *testing.T) {
+	m := modelOf(t, long(false), config.RepoConfig{})
+	y := m.diffHeight() - 2 // near the bottom, where the box doesn't fit
+	i, offset := m.screen()[y], m.offset
+	m = click(m, m.width*3/10+1+20, y)
+	if !m.editing || m.offset != offset || m.screen()[y] != i || m.screen()[y+1] != -1 {
+		t.Fatalf("offset %d→%d, screen %v", offset, m.offset, m.screen())
 	}
 }
