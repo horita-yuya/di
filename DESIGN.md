@@ -120,7 +120,7 @@ git 実行は tea.Cmd 内 (goroutine) で行い UI をブロックしない。
 - ファイル行にも `▾/▸` を表示し、クリックで fold 状態をトグル (行の他の部分はジャンプ)。
 - diff 側カーソルのファイルをツリーでハイライト (同期)。
 - Claude の返信に未回答のスレッドがあるファイル (と、それを含む閉じたディレクトリ) をスレッドと同じ黄色でハイライト。
-- ツリー下部に AI Replies パネルを常に表示 (最大で左ペインの半分)。タイトル行はツリーと区別する紫 (`#8250df`) の全幅バー。最後の発言が Claude のスレッドを `Resolve` ボタン + `file L/R行` + 返信の 1 行目で列挙。
+- ツリー下部に AI Replies パネルを常に表示 (最大で左ペインの半分)。タイトル行は file header と同じグレーの全幅バー。最後の発言が Claude のスレッドを `Resolve` ボタン + `file L/R行` + 返信の 1 行目で列挙。
   `Resolve` でスレッドを削除 (メモリ上のみ、diff からも消える) して mcp に `resolved` を送る、他の部分のクリックでそのスレッドへジャンプ。
   返信が無い時はタイトル行の下に `Restore` ボタンを置き、接続中の mcp に `restore` を送る (未接続ならエラー表示)。
   ボタンの後ろには dim でヒント → クリック後 `waiting for AI…` → `restore` 受信で `restored N` (N = 実際に追加した数) / `nothing to restore` を表示
@@ -128,7 +128,7 @@ git 実行は tea.Cmd 内 (goroutine) で行い UI をブロックしない。
 
 ### Diff
 - 平坦な row 配列 (file header / hunk header / code line / comment) を自前でスクロール描画する (viewport 不要)。
-- file header: `▼ path  +N -M` / collapsed は `▶ path` のみ。rename は `old → new`、binary は "Binary file"。ファイル境界が分かるよう濃い背景 (`#424a53`) に白太字。
+- file header: `▼ path  +N -M` / collapsed は `▶ path` のみ。rename は `old → new`、binary は "Binary file"。ファイル境界が分かるようグレー背景 (`#6e7781`) に白太字。
 - code line: `old行番号 new行番号 ±内容`、追加=緑, 削除=赤。横はみ出しは切り詰め。
 - config で collapsed なファイルはデフォルトで `▶`。ユーザーは開ける。
 - 操作はマウスのみ (キーは `ctrl+c` 終了だけ)。ホイールでポインタ下のペインをスクロール、ファイルヘッダのクリックで開閉、

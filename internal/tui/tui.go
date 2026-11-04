@@ -31,7 +31,7 @@ var (
 	addLineStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#116329")).Background(lipgloss.Color("#e6ffec"))
 	delLineStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#82071e")).Background(lipgloss.Color("#ffebe9"))
 	hunkStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#0969da")).Background(lipgloss.Color("#ddf4ff"))
-	headerStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ffffff")).Background(lipgloss.Color("#424a53"))
+	headerStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ffffff")).Background(lipgloss.Color("#6e7781"))
 	threadStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#7d4e00")).Background(lipgloss.Color("#fff8c5"))
 	folderStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#54aeff"))
 	fileStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#59636e"))
@@ -39,7 +39,6 @@ var (
 	errStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#cf222e"))
 	cursorBg     = lipgloss.Color("#b6e3ff")
 	buttonStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ffffff")).Background(lipgloss.Color("#1f883d"))
-	aiStyle      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ffffff")).Background(lipgloss.Color("#8250df"))
 	cancelStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#1f2328")).Background(lipgloss.Color("#eaeef2"))
 
 	sides = map[string]string{"old": "L", "new": "R"} // GitHub's left/right line notation
@@ -765,7 +764,7 @@ func (m model) View() tea.View {
 	}
 	w := max(0, treeW-9)
 	tree = append(tree, slices.Repeat([]string{""}, th-len(tree))...)
-	tree = append(tree, aiStyle.Inline(true).Width(treeW).MaxWidth(treeW).Render(fmt.Sprintf(" AI Replies (%d)", len(rs))))
+	tree = append(tree, headerStyle.Inline(true).Width(treeW).MaxWidth(treeW).Render(fmt.Sprintf(" AI Replies (%d)", len(rs))))
 	if len(rs) == 0 {
 		tree = append(tree, buttonStyle.Render(" Restore ")+dimStyle.Inline(true).MaxWidth(w).Render(cmp.Or(m.restoreNote, " ask Claude to restore threads")))
 	}
