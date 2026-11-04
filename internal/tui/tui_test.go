@@ -12,6 +12,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/bluekeyes/go-gitdiff/gitdiff"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/horita-yuya/di/internal/config"
 	"github.com/horita-yuya/di/internal/thread"
 )
 
@@ -43,7 +44,7 @@ func newModel(t *testing.T) (model, <-chan thread.ToMCP) {
 			sent <- msg
 		}
 	}()
-	m := model{files: files, input: textarea.New(), collapsed: map[string]bool{}, open: map[string]bool{}, peers: []net.Conn{tuiEnd}}
+	m := model{files: files, input: textarea.New(), collapsed: map[string]bool{}, open: map[string]bool{}, status: map[string]string{}, peers: []net.Conn{tuiEnd}}
 	m = update(m, tea.WindowSizeMsg{Width: 100, Height: 30})
 	return m, sent
 }
@@ -103,7 +104,7 @@ func TestCommentReplyResolveRestore(t *testing.T) {
 	if len(m.replies()) != 1 || m.treeHeight() >= m.bodyHeight() {
 		t.Fatalf("replies=%v treeHeight=%d", m.replies(), m.treeHeight())
 	}
-	if v := m.View().Content; !strings.Contains(v, "Claude replies (1)") || !strings.Contains(v, "because") {
+	if v := m.View().Content; !strings.Contains(v, "AI Replies (1)") || !strings.Contains(v, "because") {
 		t.Fatalf("panel not rendered:\n%s", v)
 	}
 
@@ -152,13 +153,78 @@ func TestRestoreButton(t *testing.T) {
 	if strings.Contains(lines[len(lines)-1], "Restore") {
 		t.Fatalf("footer still has Restore: %q", lines[len(lines)-1])
 	}
+	m = update(m, tea.WindowSizeMsg{Width: 200, Height: 30}) // room for the notes after the button
+	panel := func(m model) string { return ansi.Strip(strings.Split(m.View().Content, "\n")[m.treeHeight()+1]) }
+	if p := panel(m); !strings.Contains(p, "ask Claude to restore threads") {
+		t.Fatalf("panel %q", p)
+	}
 	m = click(m, 2, m.treeHeight()+1)
 	if got := <-sent; !got.Restore {
 		t.Fatalf("broadcast %+v", got)
+	}
+	if p := panel(m); !strings.Contains(p, "waiting for AI…") {
+		t.Fatalf("panel %q", p)
+	}
+	// A restored thread awaiting Claude is not in the panel, so the note says it arrived.
+	waiting := thread.Thread{ID: "1", File: "a.go", Side: "new", Line: 2, LineText: "TWO", Messages: []thread.Message{{Author: "user", Body: "why?"}}}
+	if m = update(m, thread.ToTUI{Restore: []thread.Thread{waiting}}); !strings.Contains(panel(m), "restored 1") {
+		t.Fatalf("panel %q", panel(m))
+	}
+	if m = update(m, thread.ToTUI{Restore: []thread.Thread{}}); !strings.Contains(panel(m), "nothing to restore") {
+		t.Fatalf("panel %q", panel(m))
+	}
+	m = click(m, 2, m.treeHeight()+1)
+	if got := <-sent; !got.Restore || !strings.Contains(panel(m), "waiting for AI…") {
+		t.Fatalf("broadcast %+v, panel %q", got, panel(m))
 	}
 	m.peers = nil
 	m = click(m, 2, m.treeHeight()+1)
 	if m.pushErr == nil {
 		t.Fatal("want an error without Claude")
+	}
+}
+
+func TestControlCharactersNotRendered(t *testing.T) {
+	m := modelOf(t, strings.Replace(diff, "+TWO", "+TWO\x1b]52;c;ZGlmZg==\x07", 1), config.RepoConfig{})
+	m = update(m, thread.ToTUI{Restore: []thread.Thread{{ID: "1", File: "a.go", Side: "new", Line: 1, LineText: "one",
+		Messages: []thread.Message{{Author: "user", Body: "why?"}, {Author: "claude", Body: "ok\x1b]52;c;cmVwbHk=\x07\x9b2J"}}}}})
+	v := m.View().Content
+	for _, payload := range []string{"]52;c;ZGlmZg==", "]52;c;cmVwbHk="} {
+		if strings.Contains(v, "\x1b"+payload) || !strings.Contains(v, "�"+payload) {
+			t.Errorf("%q not neutralized:\n%q", payload, v)
+		}
+	}
+	if strings.Contains(v, "\x9b2J") {
+		t.Error("C1 CSI reached the terminal")
+	}
+}
+
+func TestStatus(t *testing.T) {
+	m, _ := newModel(t)
+	m = update(m, thread.ToTUI{Restore: []thread.Thread{{ID: "1", File: "a.go", Side: "new", Line: 2, LineText: "TWO", Messages: user("why?")}}})
+	header := func(m model) string {
+		return m.rows[slices.IndexFunc(m.rows, func(r row) bool { return r.kind == rowThread })].text
+	}
+	if got := header(m); got != "💬 [waiting for Claude] " {
+		t.Fatalf("header %q", got)
+	}
+	m = update(m, thread.ToTUI{Status: &thread.Status{ID: "2", Text: "ghost"}})
+	if _, ok := m.status["2"]; ok {
+		t.Fatal("status kept for an unknown thread")
+	}
+	m = update(m, thread.ToTUI{Status: &thread.Status{ID: "1", Text: "reading\ntui.go"}})
+	if got := header(m); got != "💬 [AI: reading tui.go…] " || !strings.Contains(ansi.Strip(m.View().Content), "[AI: reading tui.go…]") {
+		t.Fatalf("header %q", got)
+	}
+
+	// A reply clears it, and so does resolving.
+	m = update(m, thread.ToTUI{Reply: &thread.Reply{ID: "1", Body: "because"}})
+	if _, ok := m.status["1"]; ok || header(m) != "💬 [Claude replied] " {
+		t.Fatalf("status %v header %q", m.status, header(m))
+	}
+	m = update(m, thread.ToTUI{Status: &thread.Status{ID: "1", Text: "editing"}})
+	m = click(m, 2, m.treeHeight()+1) // Resolve
+	if len(m.threads) != 0 || len(m.status) != 0 {
+		t.Fatalf("threads %v status %v", m.threads, m.status)
 	}
 }

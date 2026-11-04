@@ -25,7 +25,7 @@ func parse(t *testing.T, raw string) []*gitdiff.File {
 
 // modelOf returns a 100x30 model showing raw (files sorted by path, as load does), without Claude.
 func modelOf(t *testing.T, raw string, cfg config.RepoConfig) model {
-	m := model{raw: raw, files: parse(t, raw), cfg: cfg, input: textarea.New(), collapsed: map[string]bool{}, open: map[string]bool{}}
+	m := model{raw: raw, files: parse(t, raw), cfg: cfg, input: textarea.New(), collapsed: map[string]bool{}, open: map[string]bool{}, status: map[string]string{}}
 	return update(m, tea.WindowSizeMsg{Width: 100, Height: 30})
 }
 
@@ -143,7 +143,7 @@ func TestRepliesInClosedDirectory(t *testing.T) {
 
 	// The replies panel lists it with its first line, and clicking it jumps to the thread.
 	panel := ansi.Strip(strings.Join(lines[m.treeHeight():m.treeHeight()+3], "\n"))
-	for _, want := range []string{"Claude replies (1)", "gen/b.pb.go R1", "generated"} {
+	for _, want := range []string{"AI Replies (1)", "gen/b.pb.go R1", "generated"} {
 		if !strings.Contains(panel, want) {
 			t.Fatalf("panel lacks %q:\n%s", want, panel)
 		}
@@ -159,7 +159,7 @@ func TestRepliesInClosedDirectory(t *testing.T) {
 
 	// Once the user answers, it is no longer waiting on them.
 	m.threads[0].Messages = append(m.threads[0].Messages, thread.Message{Author: "user", Body: "ok"})
-	if v := ansi.Strip(m.View().Content); len(m.replies()) != 0 || !strings.Contains(v, "Claude replies (0)") || !strings.Contains(v, " Restore ") {
+	if v := ansi.Strip(m.View().Content); len(m.replies()) != 0 || !strings.Contains(v, "AI Replies (0)") || !strings.Contains(v, " Restore ") {
 		t.Fatal("answered thread still listed, or the empty panel lacks Restore")
 	}
 }

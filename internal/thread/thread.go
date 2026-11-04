@@ -34,13 +34,20 @@ type ToMCP struct {
 // ToTUI is sent mcp → TUI.
 type ToTUI struct {
 	Reply   *Reply   `json:"reply,omitempty"`
-	Restore []Thread `json:"restore,omitempty"`
+	Restore []Thread `json:"restore"` // no omitempty: an empty restore_comments must still reach the TUI, as a non-nil slice
+	Status  *Status  `json:"status,omitempty"`
 }
 
 // Reply is Claude's answer to a thread.
 type Reply struct {
 	ID   string `json:"id" jsonschema:"thread id"`
 	Body string `json:"body" jsonschema:"reply shown to the user in di"`
+}
+
+// Status is Claude's progress note on a thread it is working on.
+type Status struct {
+	ID   string `json:"id" jsonschema:"thread id"`
+	Text string `json:"text" jsonschema:"a few words on what you are doing now, e.g. \"reading tui.go\", \"editing\", \"running tests\""`
 }
 
 // SocketPath is unique per worktree. It is under /tmp rather than $TMPDIR, which can differ between

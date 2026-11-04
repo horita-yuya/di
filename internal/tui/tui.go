@@ -31,7 +31,7 @@ var (
 	addLineStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#116329")).Background(lipgloss.Color("#e6ffec"))
 	delLineStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#82071e")).Background(lipgloss.Color("#ffebe9"))
 	hunkStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#0969da")).Background(lipgloss.Color("#ddf4ff"))
-	headerStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#1f2328")).Background(lipgloss.Color("#eaeef2"))
+	headerStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ffffff")).Background(lipgloss.Color("#424a53"))
 	threadStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#7d4e00")).Background(lipgloss.Color("#fff8c5"))
 	folderStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#54aeff"))
 	fileStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#59636e"))
@@ -39,6 +39,7 @@ var (
 	errStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#cf222e"))
 	cursorBg     = lipgloss.Color("#b6e3ff")
 	buttonStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ffffff")).Background(lipgloss.Color("#1f883d"))
+	aiStyle      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ffffff")).Background(lipgloss.Color("#8250df"))
 	cancelStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#1f2328")).Background(lipgloss.Color("#eaeef2"))
 
 	sides = map[string]string{"old": "L", "new": "R"} // GitHub's left/right line notation
@@ -121,9 +122,11 @@ type model struct {
 	files  []*gitdiff.File
 	err    error
 
-	threads []thread.Thread
-	seq     int // last thread ID; IDs stay unique after a thread is resolved
-	peers   []net.Conn
+	threads     []thread.Thread
+	seq         int               // last thread ID; IDs stay unique after a thread is resolved
+	status      map[string]string // thread ID → Claude's latest set_status, until it replies
+	restoreNote string            // feedback after the Restore button, e.g. " restored 2"
+	peers       []net.Conn
 
 	collapsed map[string]bool // file path → folded
 	open      map[string]bool // dir path → expanded
@@ -165,7 +168,7 @@ func Run(repo *git.Repo, sock, slug string, cfg config.RepoConfig, base string) 
 	input.ShowLineNumbers = false
 	input.SetHeight(5)
 	p := tea.NewProgram(model{repo: repo, slug: slug, cfg: cfg, base: base, bases: slices.Compact([]string{base, "origin/main", "HEAD"}), input: input,
-		collapsed: map[string]bool{}, open: map[string]bool{},
+		collapsed: map[string]bool{}, open: map[string]bool{}, status: map[string]string{},
 		seq: int(time.Now().Unix())}) // new IDs stay above those of threads restored from an earlier run
 	go func() {
 		for {
@@ -249,12 +252,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if i := slices.IndexFunc(m.threads, func(t thread.Thread) bool { return t.ID == r.ID }); i >= 0 {
 				m.threads[i].Messages = append(m.threads[i].Messages, thread.Message{Author: "claude", Body: r.Body})
 			}
+			delete(m.status, r.ID)
 		}
-		for _, t := range msg.Restore {
-			n, _ := strconv.Atoi(t.ID)
-			m.seq = max(m.seq, n)
-			if len(t.Messages) > 0 && !slices.ContainsFunc(m.threads, func(u thread.Thread) bool { return u.ID == t.ID }) {
-				m.threads = append(m.threads, t)
+		if s := msg.Status; s != nil && slices.ContainsFunc(m.threads, func(t thread.Thread) bool { return t.ID == s.ID }) {
+			m.status[s.ID] = s.Text
+		}
+		if msg.Restore != nil {
+			added := 0
+			for _, t := range msg.Restore {
+				n, _ := strconv.Atoi(t.ID)
+				m.seq = max(m.seq, n)
+				if len(t.Messages) > 0 && !slices.ContainsFunc(m.threads, func(u thread.Thread) bool { return u.ID == t.ID }) {
+					m.threads = append(m.threads, t)
+					added++
+				}
+			}
+			// Restored threads awaiting Claude don't show in the panel, so it says what happened.
+			m.restoreNote = fmt.Sprintf(" restored %d", added)
+			if added == 0 {
+				m.restoreNote = " nothing to restore"
 			}
 		}
 		m.build()
@@ -321,7 +337,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case !click || mouse.Button != tea.MouseLeft:
 		case mouse.Y == m.height-1:
 			// Base buttons in the footer, laid out as in View.
-			x := lipgloss.Width(m.status() + m.branch + " ← ")
+			x := lipgloss.Width(m.connection() + m.branch + " ← ")
 			for _, b := range m.bases {
 				w := lipgloss.Width(" " + b + " ")
 				if mouse.X >= x && mouse.X < x+w && b != m.base {
@@ -369,7 +385,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		case inTree:
-			// Claude replies panel: a title row, then 2 rows per thread with " Resolve " at x 0-8 on the first,
+			// AI Replies panel: a title row, then 2 rows per thread with " Resolve " at x 0-8 on the first,
 			// or " Restore " at x 0-8 when there are none.
 			y, rs := mouse.Y-m.treeHeight()-1, m.replies()
 			if len(rs) == 0 && y == 0 && mouse.X < 9 {
@@ -377,6 +393,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.pushErr = errors.New("Claude not connected")
 				} else {
 					m.broadcast(thread.ToMCP{Restore: true})
+					m.restoreNote = " waiting for AI…"
 				}
 			}
 			if y < 0 || y/2 >= len(rs) {
@@ -385,6 +402,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			t := rs[y/2]
 			if y%2 == 0 && mouse.X < 9 {
 				m.threads = slices.DeleteFunc(m.threads, func(u thread.Thread) bool { return u.ID == t.ID })
+				delete(m.status, t.ID)
 				m.broadcast(thread.ToMCP{Resolved: t.ID})
 				if m.editing && !m.commit && m.replyTo == t.ID {
 					m.editing = false
@@ -497,9 +515,9 @@ func (m *model) build() {
 		lines := map[lineKey]string{}
 		for _, frag := range f.TextFragments {
 			old, new := int(frag.OldPosition), int(frag.NewPosition)
-			body = append(body, row{kind: rowHunk, file: f, frag: frag, old: old, new: new, text: frag.Header()})
+			body = append(body, row{kind: rowHunk, file: f, frag: frag, old: old, new: new, text: printable(frag.Header())})
 			for i, l := range frag.Lines {
-				r := row{kind: rowLine, file: f, frag: frag, idx: i, text: strings.TrimSuffix(l.Line, "\n")}
+				r := row{kind: rowLine, file: f, frag: frag, idx: i, text: printable(strings.TrimSuffix(l.Line, "\n"))}
 				if l.Old() {
 					r.old, old = old, old+1
 				}
@@ -519,14 +537,14 @@ func (m *model) build() {
 			if text, ok := lines[k]; ok && text == t.LineText {
 				attached[k] = append(attached[k], t)
 			} else {
-				m.rows = append(m.rows, threadRows(f, t, fmt.Sprintf("(outdated %s:%d) ", t.Side, t.Line), m.diffWidth()-codeX)...)
+				m.rows = append(m.rows, threadRows(f, t, printable(fmt.Sprintf("(outdated %s:%d) ", t.Side, t.Line)), m.status[t.ID], m.diffWidth()-codeX)...)
 			}
 		}
 		for _, r := range body {
 			m.rows = append(m.rows, r)
 			if r.kind == rowLine {
 				for _, t := range attached[r.key()] {
-					m.rows = append(m.rows, threadRows(f, t, "", m.diffWidth()-codeX)...)
+					m.rows = append(m.rows, threadRows(f, t, "", m.status[t.ID], m.diffWidth()-codeX)...)
 				}
 			}
 		}
@@ -538,7 +556,7 @@ func (m *model) build() {
 	for _, f := range m.files {
 		parts := strings.Split(path(f), "/")
 		for d := 1; d <= len(parts); d++ {
-			n := node{path: strings.Join(parts[:d], "/"), name: parts[d-1], depth: d - 1, dir: d < len(parts)}
+			n := node{path: strings.Join(parts[:d], "/"), name: printable(parts[d-1]), depth: d - 1, dir: d < len(parts)}
 			if seen[n.path] {
 				continue
 			}
@@ -578,12 +596,14 @@ func (m *model) build() {
 	m.scroll()
 }
 
-// threadRows renders t as rows of at most width cells, wrapping message bodies.
-func threadRows(f *gitdiff.File, t thread.Thread, label string, width int) []row {
+// threadRows renders t as rows of at most width cells, wrapping message bodies. status is Claude's progress note.
+func threadRows(f *gitdiff.File, t thread.Thread, label, status string, width int) []row {
 	var lines []string
 	switch {
 	case t.Messages[len(t.Messages)-1].Author == "claude":
 		lines = []string{"💬 [Claude replied] " + label}
+	case status != "":
+		lines = []string{"💬 [AI: " + strings.ReplaceAll(printable(status), "\n", " ") + "…] " + label}
 	default:
 		lines = []string{"💬 [waiting for Claude] " + label}
 	}
@@ -592,7 +612,7 @@ func threadRows(f *gitdiff.File, t thread.Thread, label string, width int) []row
 		if msg.Author == "claude" {
 			who = "claude: "
 		}
-		for i, l := range strings.Split(ansi.Wrap(msg.Body, width-2-len(who), ""), "\n") {
+		for i, l := range strings.Split(ansi.Wrap(printable(msg.Body), width-2-len(who), ""), "\n") {
 			if i > 0 {
 				who = strings.Repeat(" ", len(who))
 			}
@@ -673,7 +693,7 @@ func (m model) replies() []thread.Thread {
 	})
 }
 
-// treeHeight is the tree's share of the left pane; the Claude replies panel takes the rest, up to half:
+// treeHeight is the tree's share of the left pane; the AI Replies panel takes the rest, up to half:
 // a title row, then 2 rows per reply or the Restore row when there are none.
 func (m model) treeHeight() int {
 	h := m.bodyHeight()
@@ -743,17 +763,17 @@ func (m model) View() tea.View {
 		}
 		tree = append(tree, st.Inline(true).Width(treeW).MaxWidth(treeW).Render(text))
 	}
-	title, w := fmt.Sprintf("─ Claude replies (%d) ", len(rs)), max(0, treeW-9)
+	w := max(0, treeW-9)
 	tree = append(tree, slices.Repeat([]string{""}, th-len(tree))...)
-	tree = append(tree, dimStyle.Inline(true).MaxWidth(treeW).Render(title+strings.Repeat("─", max(0, treeW-lipgloss.Width(title)))))
+	tree = append(tree, aiStyle.Inline(true).Width(treeW).MaxWidth(treeW).Render(fmt.Sprintf(" AI Replies (%d)", len(rs))))
 	if len(rs) == 0 {
-		tree = append(tree, buttonStyle.Render(" Restore ")+dimStyle.Inline(true).MaxWidth(w).Render(" ask Claude to restore threads"))
+		tree = append(tree, buttonStyle.Render(" Restore ")+dimStyle.Inline(true).MaxWidth(w).Render(cmp.Or(m.restoreNote, " ask Claude to restore threads")))
 	}
 	for _, t := range rs {
 		msg, _, _ := strings.Cut(t.Messages[len(t.Messages)-1].Body, "\n")
 		tree = append(tree,
-			buttonStyle.Render(" Resolve ")+threadStyle.Inline(true).Width(w).MaxWidth(w).Render(fmt.Sprintf(" %s %s%d", t.File, sides[t.Side], t.Line)),
-			dimStyle.Inline(true).MaxWidth(treeW).Render("  "+msg))
+			buttonStyle.Render(" Resolve ")+threadStyle.Inline(true).Width(w).MaxWidth(w).Render(printable(fmt.Sprintf(" %s %s%d", t.File, sides[t.Side], t.Line))),
+			dimStyle.Inline(true).MaxWidth(treeW).Render("  "+printable(msg)))
 	}
 	tree = tree[:h] // entries past the panel are not shown
 
@@ -769,7 +789,7 @@ func (m model) View() tea.View {
 			if i := slices.IndexFunc(m.threads, func(t thread.Thread) bool { return t.ID == m.replyTo }); i >= 0 {
 				t = m.threads[i]
 			}
-			btn, hint = " Comment ", fmt.Sprintf("  → %s %s%d", t.File, sides[t.Side], t.Line)
+			btn, hint = " Comment ", printable(fmt.Sprintf("  → %s %s%d", t.File, sides[t.Side], t.Line))
 		}
 		box = append(strings.Split(m.input.View(), "\n"), buttonStyle.Render(btn)+"  "+cancelStyle.Render(" Cancel ")+dimStyle.Render(hint))
 		if v.Cursor = m.input.Cursor(); v.Cursor != nil {
@@ -801,9 +821,9 @@ func (m model) View() tea.View {
 		switch r.kind {
 		case rowFile:
 			st = headerStyle
-			name := path(r.file)
+			name := printable(path(r.file))
 			if r.file.IsRename {
-				name = r.file.OldName + " → " + r.file.NewName
+				name = printable(r.file.OldName + " → " + r.file.NewName)
 			}
 			switch add, del := stat(r.file); {
 			case m.collapsed[path(r.file)]:
@@ -849,7 +869,7 @@ func (m model) View() tea.View {
 		a, d := stat(f)
 		add, del = add+a, del+d
 	}
-	footer := m.status() + m.branch + " ←"
+	footer := m.connection() + m.branch + " ←"
 	for _, b := range m.bases {
 		st := cancelStyle
 		if b == m.base {
@@ -860,10 +880,10 @@ func (m model) View() tea.View {
 	footer += "  " + buttonStyle.Render(map[bool]string{false: " Commit & Push ", true: " Pushing… "}[m.pushing]) + "  " + buttonStyle.Render(" Open PR ")
 	footer += fmt.Sprintf("  %d files  +%d -%d", len(m.files), add, del)
 	if m.err != nil {
-		footer += "  │ " + errStyle.Render(m.err.Error())
+		footer += "  │ " + errStyle.Render(printable(m.err.Error()))
 	}
 	if m.pushErr != nil {
-		footer += "  │ " + errStyle.Render(m.pushErr.Error())
+		footer += "  │ " + errStyle.Render(printable(m.pushErr.Error()))
 	}
 
 	view := lipgloss.JoinHorizontal(lipgloss.Top,
@@ -878,12 +898,23 @@ func (m model) View() tea.View {
 	return v
 }
 
-// status is the footer's leading Claude connection indicator.
-func (m model) status() string {
+// connection is the footer's leading Claude connection indicator.
+func (m model) connection() string {
 	if len(m.peers) > 0 {
 		return addStyle.Bold(true).Render(fmt.Sprintf("● Claude connected (%d)", len(m.peers))) + "  "
 	}
 	return dimStyle.Render("○ Claude not connected") + "  "
+}
+
+// printable replaces control characters (C0 but tab and newline, DEL, C1) in untrusted text, such as diff lines,
+// file names, Claude's replies and git errors, with '�' so it can't drive the terminal.
+func printable(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 && r != '\t' && r != '\n' || r >= 0x7f && r <= 0x9f {
+			return '�'
+		}
+		return r
+	}, s)
 }
 
 // path is the new path, or the old path for deleted files.
