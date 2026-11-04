@@ -147,7 +147,8 @@ git 実行は tea.Cmd 内 (goroutine) で行い UI をブロックしない。
   閉じている時は Claude の作業中なら `[AI: <status>…]`、未読の返信があれば `● Claude replied` をタイトルに付ける (Worktrees の `●N` にも 1 として数える)。
 - タイトルのクリックで開閉。開くと diff ペインの下半分 (最低 textarea + 4 行) を使い、タイトル → 会話ログ (`you:` / `claude:`、折り返し、下詰め、
   ホイールでスクロール) → textarea (幅 = diff ペイン - 2) + `Send` ボタン。開くと textarea がここに移ってフォーカスする (書きかけは保持)。
-  コメント入力中は textarea の代わりに入力欄風の 1 行を出し、セクション内 (タイトル以外) のどこをクリックしてもこちらに戻す。閉じると textarea も閉じる。
+  コード行 / スレッドの `Comment` のクリックでコメント入力に移るとセクションは閉じる (会話は残る)。
+  textarea が他にある間は入力欄風の 1 行を出し、セクション内 (タイトル以外) のどこをクリックしてもこちらに戻す。閉じると textarea も閉じる。
 - 送信で `chat` に追加して接続中の mcp に `message` を送る。textarea は開いたまま (続けて送れる)。未接続ならエラー表示で下書きは残す。
 - Claude は予約 ID `message` で `reply_comment` / `set_status` する。Restore でも ID `message` のスレッドとして返ってくれば (chat が空なら) 会話を戻す。
 
@@ -162,6 +163,7 @@ git 実行は tea.Cmd 内 (goroutine) で行い UI をブロックしない。
   OSC 52 (`tea.SetClipboard`) でクリップボードへコピー、次の press かホイールで消える。
   クリック位置の画面テキストに URL (`https?://…`) があれば (darwin は `open`, 他は `xdg-open`) で開き、他の動作はしない。
   行末まで続く URL は折り返し / 切り詰めの可能性があるので、スレッド本文にそれで始まる URL があれば全体を開く。
+  URL は diff ペインの各行・Message AI の会話・AI Replies の一覧でリンク色 (`#0969da`) + 下線で描く (行の背景色は保つ)。
 ホイールでポインタ下のペインをスクロール、ファイルヘッダのクリックで開閉、
   コード行のクリックでコメント入力 (ホバー行の gutter に `+` を表示、入力中のクリックは書きかけのまま対象を切替)。
   bubbles/textarea + `Comment` / `Cancel` ボタンの box は diff ペイン内の対象行 (返信ならスレッドの `Comment` 行) の直下に inline で描画し、コード本文の開始位置 (gutter 2 + 行番号 10 = 12 桁目) に揃える。

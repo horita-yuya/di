@@ -45,6 +45,7 @@ var (
 	buttonStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ffffff")).Background(lipgloss.Color("#1f883d"))
 	cancelStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#1f2328")).Background(lipgloss.Color("#eaeef2"))
 	selStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#ffffff")).Background(lipgloss.Color("#0969da"))
+	linkColor    = lipgloss.Color("#0969da")
 
 	// urlRe finds URLs in screen text, which has no spaces or quotes in them and ends at the pane border.
 	urlRe = regexp.MustCompile("https?://[^\\s<>\"'`│]+")
@@ -575,6 +576,7 @@ func (m *model) click(x, y int) tea.Cmd {
 			m.build()
 		case rowComment, rowLine: // retargets an open textarea, keeping the draft
 			m.editing, m.commit, m.direct, m.replyTo, m.target = true, false, false, r.thread, r
+			m.chatOpen = false // the comment needs the room; the conversation stays
 			m.input.Placeholder = "Leave a comment (enter: send, alt+enter: newline)"
 			m.input.SetWidth(m.diffWidth() - codeX)
 			// r is the anchor now: scroll the box below it into view.
@@ -906,7 +908,7 @@ func (m model) chatLog(w int) []string {
 			if i > 0 {
 				who = strings.Repeat(" ", len(who))
 			}
-			lines = append(lines, "  "+dimStyle.Render(who)+l)
+			lines = append(lines, "  "+dimStyle.Render(who)+links(lipgloss.NewStyle(), l))
 		}
 	}
 	return lines
@@ -1094,7 +1096,7 @@ func (m model) View() tea.View {
 		msg, _, _ := strings.Cut(t.Messages[len(t.Messages)-1].Body, "\n")
 		tree = append(tree,
 			buttonStyle.Render(" Resolve ")+threadStyle.Inline(true).Width(w).MaxWidth(w).Render(printable(fmt.Sprintf(" %s %s%d", t.File, sides[t.Side], t.Line))),
-			dimStyle.Inline(true).MaxWidth(treeW).Render("  "+printable(msg)))
+			links(dimStyle, ansi.Truncate("  "+printable(msg), treeW, "")))
 	}
 	tree = fit(tree, h) // entries past the panel are not shown
 
@@ -1179,8 +1181,9 @@ func (m model) View() tea.View {
 		}
 		// Rendered in pieces: an inner style would cut the line background.
 		w := diffW - lipgloss.Width(pre+btn)
+		text = ansi.Truncate(strings.ReplaceAll(text, "\t", "    "), w, "")
 		diff = append(diff, st.Inline(true).Render(pre)+buttonStyle.Render(btn)+
-			st.Inline(true).Width(w).MaxWidth(w).Render(strings.ReplaceAll(text, "\t", "    ")))
+			links(st, text+strings.Repeat(" ", max(0, w-ansi.StringWidth(text)))))
 	}
 	if len(m.rows) == 0 {
 		diff = append(diff, dimStyle.Render("no changes against "+m.base))
@@ -1303,7 +1306,7 @@ func (m model) urlAt(x, y int) string {
 	}
 	l := lines[y]
 	for _, loc := range urlRe.FindAllStringIndex(l, -1) {
-		u := strings.TrimRight(l[loc[0]:loc[1]], ".,;:!?)]}'")
+		u := trimURL(l[loc[0]:loc[1]])
 		if a := ansi.StringWidth(l[:loc[0]]); x < a || x >= a+ansi.StringWidth(u) {
 			continue
 		}
@@ -1311,7 +1314,7 @@ func (m model) urlAt(x, y int) string {
 			for _, t := range m.threads {
 				for _, msg := range t.Messages {
 					for _, full := range urlRe.FindAllString(msg.Body, -1) {
-						if full = strings.TrimRight(full, ".,;:!?)]}'"); len(full) > len(u) && strings.HasPrefix(full, u) {
+						if full = trimURL(full); len(full) > len(u) && strings.HasPrefix(full, u) {
 							return full
 						}
 					}
@@ -1321,6 +1324,22 @@ func (m model) urlAt(x, y int) string {
 		return u
 	}
 	return ""
+}
+
+// trimURL drops the punctuation a URL found in text usually ends with, e.g. the period closing a sentence.
+func trimURL(u string) string { return strings.TrimRight(u, ".,;:!?)]}'") }
+
+// links renders text in st, with the URLs in it in the link color and underlined over the same background.
+func links(st lipgloss.Style, text string) string {
+	st = st.Inline(true)
+	var b strings.Builder
+	last := 0
+	for _, loc := range urlRe.FindAllStringIndex(text, -1) {
+		end := loc[0] + len(trimURL(text[loc[0]:loc[1]]))
+		b.WriteString(st.Render(text[last:loc[0]]) + st.Foreground(linkColor).Underline(true).Render(text[loc[0]:end]))
+		last = end
+	}
+	return b.String() + st.Render(text[last:])
 }
 
 // openURL opens u in the default browser.

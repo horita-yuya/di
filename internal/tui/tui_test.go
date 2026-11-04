@@ -342,12 +342,17 @@ func TestMessageAI(t *testing.T) {
 	if !strings.Contains(at(m, h-1), "● Claude replied") {
 		t.Fatalf("title %q", at(m, h-1))
 	}
-	// While the textarea is on a comment, a click anywhere in the open section brings it back.
+	// Commenting on a line closes the section; reopened, the conversation is still there.
 	m = click(m, diffX+2, h-1)
 	m = click(m, diffX+codeX+2, lineY(t, m, func(r row) bool { return r.kind == rowLine && r.text == "TWO" }))
-	if m.direct || !m.editing {
-		t.Fatal("comment did not take the textarea")
+	if m.direct || !m.editing || m.chatOpen || m.diffHeight() != h-1 {
+		t.Fatalf("direct=%v editing=%v open=%v", m.direct, m.editing, m.chatOpen)
 	}
+	if m = click(m, diffX+2, h-1); !m.direct || !m.input.Focused() || len(m.chat) != 3 {
+		t.Fatalf("direct=%v chat=%v", m.direct, m.chat)
+	}
+	// While the textarea is elsewhere, a click anywhere in the open section brings it back.
+	m.editing, m.direct = true, false
 	if m = click(m, diffX+20, m.diffHeight()+2); !m.direct || !m.input.Focused() {
 		t.Fatal("click in the conversation did not bring the input back")
 	}
@@ -432,5 +437,13 @@ func TestURLAt(t *testing.T) {
 	}
 	if got := m.urlAt(diffX+2, y); got != "" {
 		t.Fatalf("urlAt off the URL = %q", got)
+	}
+	// URLs are drawn as links, keeping the thread's background, without the period after them.
+	link := threadStyle.Inline(true).Foreground(linkColor).Underline(true)
+	if v := m.View().Content; !strings.Contains(v, link.Render("https://example.com/")) {
+		t.Fatalf("URL not drawn as a link:\n%q", v)
+	}
+	if got := links(lipgloss.NewStyle(), "see https://x.y/z."); got != "see "+lipgloss.NewStyle().Foreground(linkColor).Underline(true).Render("https://x.y/z")+"." {
+		t.Fatalf("links = %q", got)
 	}
 }
