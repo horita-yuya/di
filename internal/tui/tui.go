@@ -881,7 +881,7 @@ func threadRows(f *gitdiff.File, t thread.Thread, label, status string, width in
 		if msg.Author == "claude" {
 			who = "claude: "
 		}
-		for i, l := range strings.Split(ansi.Wrap(printable(msg.Body), width-2-len(who), ""), "\n") {
+		for i, l := range wrapBody(msg.Body, width-2-len(who)) {
 			if i > 0 {
 				who = strings.Repeat(" ", len(who))
 			}
@@ -1019,7 +1019,7 @@ func (m model) chatLog(w int) []string {
 		if msg.Author == "claude" {
 			who = "claude: "
 		}
-		for i, l := range strings.Split(ansi.Wrap(printable(msg.Body), max(1, w-2-len(who)), ""), "\n") {
+		for i, l := range wrapBody(msg.Body, max(1, w-2-len(who))) {
 			if i > 0 {
 				who = strings.Repeat(" ", len(who))
 			}
@@ -1491,6 +1491,111 @@ func (m model) connection() string {
 
 // printable replaces control characters (C0 but tab and newline, DEL, C1) in untrusted text, such as diff lines,
 // file names, Claude's replies and git errors, with '�' so it can't drive the terminal.
+// wrapBody wraps a message body to w cells, drawing Markdown tables as boxes.
+func wrapBody(body string, w int) []string {
+	var out, text []string
+	flush := func() {
+		if len(text) > 0 {
+			out = append(out, strings.Split(ansi.Wrap(strings.Join(text, "\n"), w, ""), "\n")...)
+			text = nil
+		}
+	}
+	lines := strings.Split(printable(body), "\n")
+	for i := 0; i < len(lines); i++ {
+		j := i
+		for j < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[j]), "|") {
+			j++
+		}
+		if j-i >= 2 && tableRule.MatchString(strings.TrimSpace(lines[i+1])) {
+			if box := table(lines[i:j], w); box != nil {
+				flush()
+				out = append(out, box...)
+				i = j - 1
+				continue
+			}
+		}
+		text = append(text, lines[i])
+	}
+	flush()
+	return out
+}
+
+var tableRule = regexp.MustCompile(`^\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?$`)
+
+// table draws Markdown table lines (header, rule, rows) as a box at most w cells wide, wrapping cells
+// within their columns, or returns nil when the columns cannot fit.
+func table(lines []string, w int) []string {
+	var cells [][]string
+	n := 0
+	for i, l := range lines {
+		if i == 1 {
+			continue // the rule under the header
+		}
+		l = strings.TrimSpace(l)
+		l = strings.TrimSuffix(strings.TrimPrefix(l, "|"), "|")
+		var row []string
+		for _, c := range strings.Split(strings.ReplaceAll(l, `\|`, "\x00"), "|") {
+			c = strings.NewReplacer("\x00", "|", "**", "", "`", "").Replace(strings.TrimSpace(c))
+			row = append(row, c)
+		}
+		cells, n = append(cells, row), max(n, len(row))
+	}
+	widths := make([]int, n)
+	for _, row := range cells {
+		for i, c := range row {
+			widths[i] = max(widths[i], ansi.StringWidth(c), 1)
+		}
+	}
+	room := w - 3*n - 1 // "│ " before each cell, " " after it and the closing "│"
+	if room < 2*n {
+		return nil
+	}
+	for sum(widths) > room { // narrow the widest column until the table fits
+		widths[slices.Index(widths, slices.Max(widths))]--
+	}
+	rule := func(l, m, r string) string {
+		parts := make([]string, n)
+		for i, cw := range widths {
+			parts[i] = strings.Repeat("─", cw+2)
+		}
+		return l + strings.Join(parts, m) + r
+	}
+	out := []string{rule("┌", "┬", "┐")}
+	for k, row := range cells {
+		if k > 0 {
+			out = append(out, rule("├", "┼", "┤"))
+		}
+		wrapped, h := make([][]string, n), 1
+		for i := range n {
+			c := ""
+			if i < len(row) {
+				c = row[i]
+			}
+			wrapped[i] = strings.Split(ansi.Wrap(c, widths[i], ""), "\n")
+			h = max(h, len(wrapped[i]))
+		}
+		for y := range h {
+			var b strings.Builder
+			for i, cw := range widths {
+				c := ""
+				if y < len(wrapped[i]) {
+					c = wrapped[i][y]
+				}
+				b.WriteString("│ " + c + strings.Repeat(" ", max(0, cw-ansi.StringWidth(c))) + " ")
+			}
+			out = append(out, b.String()+"│")
+		}
+	}
+	return append(out, rule("└", "┴", "┘"))
+}
+
+func sum(xs []int) (s int) {
+	for _, x := range xs {
+		s += x
+	}
+	return s
+}
+
 func printable(s string) string {
 	return strings.Map(func(r rune) rune {
 		if r < 0x20 && r != '\t' && r != '\n' || r >= 0x7f && r <= 0x9f {

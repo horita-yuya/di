@@ -530,3 +530,28 @@ func TestCommentBoxOpensBelowTheLine(t *testing.T) {
 		t.Fatalf("offset %d→%d, screen %v", offset, m.offset, m.screen())
 	}
 }
+
+func TestWrapBodyTable(t *testing.T) {
+	body := "前置き\n\n  | 名前 | `code` | 説明 |\n  |---|---|---|\n  | りんご（果物） | ✅ | 赤い |\n  | `banana`（果物） | ー | **黄色い**（熟すと茶色の斑点が出てくる） |\n\n後書き"
+	for _, w := range []int{80, 40, 20} {
+		lines := wrapBody(body, w)
+		if lines[0] != "前置き" || lines[len(lines)-1] != "後書き" {
+			t.Fatalf("width %d: text around the table = %q", w, lines)
+		}
+		box := lines[2 : len(lines)-2]
+		if !strings.HasPrefix(box[0], "┌") || !strings.HasPrefix(box[len(box)-1], "└") {
+			t.Fatalf("width %d: not a box: %q", w, box)
+		}
+		for _, l := range box {
+			if got, want := ansi.StringWidth(l), ansi.StringWidth(box[0]); got != want || got > w {
+				t.Errorf("width %d: line %q is %d cells, want %d", w, l, got, want)
+			}
+		}
+		if strings.Contains(strings.Join(box, ""), "`") || strings.Contains(strings.Join(box, ""), "**") {
+			t.Errorf("width %d: markup left in %q", w, box)
+		}
+	}
+	if got := wrapBody("| a | b |\n|---|---|\n| 1 | 2 |", 5); strings.HasPrefix(got[0], "┌") {
+		t.Errorf("a table that cannot fit should stay text, got %q", got)
+	}
+}
